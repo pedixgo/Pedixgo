@@ -1,0 +1,72 @@
+# ================================================================
+# Pedix — Security + Cache Headers (Netlify)
+# Arquivo: _headers  (colocar na raiz do deploy, junto com os .html)
+#
+# FIX 2026-07-02: a CSP original bloqueava silenciosamente (sem erro visível
+# na tela, só no console) recursos que os apps já usam de verdade:
+#   - Pedix Go: unpkg.com (Leaflet, mapa+CSS), *.tile.openstreetmap.org
+#     (tiles do mapa) — sem isso o mapa da entrega ativa não carrega.
+#   - Burger/Açaí/Pizza/Petshop/Farmácia/Ateliê: router.project-osrm.org
+#     (cálculo de taxa de entrega por rota real) — sem isso, TODO cálculo de
+#     frete por distância cai sempre no fallback de linha reta (haversine),
+#     mesmo bug que já existia na meta-CSP própria do Burger, corrigido
+#     agora nos dois lugares.
+# Este arquivo é a UNIÃO de tudo que os 3 apps (Burger, Pedix Go, Gestor)
+# realmente carregam — é seguro reutilizar em qualquer um dos três mesmo que
+# alguns domínios não se apliquem a um app específico (CSP só permite, nunca
+# obriga usar).
+# ================================================================
+
+/*
+  # ── CORS (necessário para core.js ser lido por outros domínios/apps) ──
+  Access-Control-Allow-Origin: *
+  Access-Control-Allow-Methods: GET
+  Access-Control-Allow-Headers: Content-Type
+
+  # ── Clickjacking ──────────────────────────────────────────────
+  X-Frame-Options: DENY
+  # (também via CSP frame-ancestors abaixo, que prevalece em browsers modernos)
+  # IMPORTANTE: isto é a ÚNICA proteção real contra clickjacking. O <meta
+  # http-equiv="Content-Security-Policy"> que cada app já tem embutido no
+  # HTML não consegue entregar frame-ancestors (o spec ignora essa diretiva
+  # quando vem só de <meta>) — só funciona via header HTTP, como aqui.
+
+  # ── Tipo MIME sniffing ─────────────────────────────────────────
+  X-Content-Type-Options: nosniff
+
+  # ── Referrer ──────────────────────────────────────────────────
+  Referrer-Policy: strict-origin-when-cross-origin
+
+  # ── Permissions ───────────────────────────────────────────────
+  Permissions-Policy: geolocation=(self), camera=(), microphone=()
+
+  # ── Content Security Policy ───────────────────────────────────
+  # 'unsafe-inline' em script-src é necessário porque os apps usam
+  # JS inline extensivamente (template único). Remover exigiria
+  # mover todo o JS para arquivos externos + usar nonces.
+  #
+  # 'unsafe-inline' em style-src idem (estilos inline nos apps).
+  #
+  # unpkg.com em script-src/style-src/font-src: Leaflet (mapa do Pedix Go).
+  # router.project-osrm.org em connect-src: cálculo de rota/frete real (Burger
+  #   e demais templates) e raio de entrega.
+  # *.tile.openstreetmap.org e *.openstreetmap.org em img-src: tiles do mapa.
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://www.gstatic.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://www.emailjs.com https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdnjs.cloudflare.com https://unpkg.com; font-src 'self' https://fonts.gstatic.com https://unpkg.com; img-src 'self' data: blob: https://i.ibb.co https://api.imgbb.com https://storage.googleapis.com https://*.firebasestorage.app https://lh3.googleusercontent.com https://maps.googleapis.com https://*.tile.openstreetmap.org https://*.openstreetmap.org https://cdnjs.cloudflare.com; connect-src 'self' https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://storage.googleapis.com https://api.imgbb.com https://viacep.com.br https://nominatim.openstreetmap.org https://api.emailjs.com https://router.project-osrm.org wss://*.firebaseio.com; worker-src 'self' blob:; frame-ancestors 'none'; object-src 'none'; base-uri 'self'
+
+# ================================================================
+# Cache — apps PEDIX são HTML único; nunca devem ficar em cache do
+# navegador, ou uma correção publicada não chega no cliente até ele
+# limpar o cache manualmente.
+# ================================================================
+/*.html
+  Cache-Control: no-cache, no-store, must-revalidate
+
+# v1.0.3 FIX (relato Falcao — manifest.json corrigido não fazia efeito mesmo
+# depois de republicado; 404 no PWA persistia): a regra acima só cobria
+# arquivos .html — manifest.json e sw.js ficavam de fora, sujeitos ao cache
+# padrão (mais agressivo) do navegador/CDN, então o app instalado podia
+# continuar lendo o start_url ANTIGO mesmo com o servidor já corrigido.
+/manifest.json
+  Cache-Control: no-cache, no-store, must-revalidate
+/sw.js
+  Cache-Control: no-cache, no-store, must-revalidate

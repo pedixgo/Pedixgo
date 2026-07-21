@@ -1,0 +1,2748 @@
+<!DOCTYPE html>
+<!-- Revision: 2026-07-20 v2.2.4 - AUDITORIA FINAL (2 correções): (1) ORTOGRAFIA — 3 mensagens visíveis ao entregador sem acento corrigidas ("loja não encontrada", "Pedido não encontrado", "Vá até a loja"). (2) UI — nome da loja no card de entrega agora trunca com "..." em vez de estourar o layout quando muito longo (white-space:nowrap + text-overflow:ellipsis em .del-card-store); endereços da rota continuam quebrando linha normalmente, de propósito — o entregador precisa ler o endereço completo.
+<!-- Revision: 2026-07-18 v2.2.3 - FEAT CRÍTICO (decisão Falcao — "internet cair na hora não pode perder o pedido, tem que persistir até a conexão voltar" — especialmente importante aqui, já que o entregador está sempre em movimento): ativada a persistência offline do Firestore (initializeFirestore + persistentLocalCache) — leituras funcionam com cache local, e ações feitas offline (aceitar, confirmar coleta/entrega) ficam na fila e sincronizam automaticamente quando a conexão voltar, mesmo que o app tenha sido fechado e reaberto nesse meio-tempo. Mesmo fix aplicado no Burger, Pizza e Petshop.
+<!-- Revision: 2026-07-18 v2.2.2 - FEAT CRÍTICO (decisão Falcao — "só finalizar a entrega quando o entregador receber o pagamento": pra Débito/Crédito/Dinheiro/Pix na entrega — pago no ato, não antecipado. Pix pré-pago continua sem exigir nada extra): modal de confirmar entrega (avulso) agora mostra o valor a cobrar e muda o texto do botão pra deixar explícito que confirmar a entrega TAMBÉM confirma que o pagamento foi recebido. Mesma lógica no fluxo de múltiplas entregas (frota), explícita na própria pergunta de confirmação. Depende do Burger/Pizza/Petshop mandarem forma de pagamento e valor total no payload da entrega — sem esses dados, segue o comportamento normal (sem etapa extra).
+<!-- Revision: 2026-07-17 v2.2.1 - 2 FIX CRÍTICOS GRAVES (relato Falcao): (1) AVULSO: transação de aceite sobrescrevia activeOrderId (singular) sem checar se o entregador já tinha uma entrega ativa — a entrega antiga continuava "assigned" a ele de verdade no Firestore, só o app parava de rastrear ela (só guarda 1 id por vez pro avulso), por isso "sumia" da tela e podia "reaparecer" se algo relesse o valor antigo. Corrigido: lê motoboys/{uid} DENTRO da mesma transação e recusa o aceite com erro claro se já tiver uma entrega ativa. (2) FROTA: enterApp() decidia qual tela abrir sem ser 100% guiado pelo tipo do entregador — se o documento tivesse um valor perdido no campo singular activeOrderId (ex: já foi avulso antes), caía no fluxo de ENTREGA ÚNICA por engano, perdendo de vista o array activeOrderIds inteiro (com a 1ª entrega aceita) naquela sessão — daí "não aceita duas entregas, uma some" + "reaparece ao deslogar e logar de novo". Reestruturado pra ser 100% guiado pelo tipo: frota nunca mais cai no fluxo de entrega única.
+<!-- Revision: 2026-07-17 v2.2.0 - 2 FIX CRÍTICOS (relato+print+confirmação Falcao): (1) Botão de login normal (doLogin, email/senha) ficava preso em "Verificando..." pra sempre — mesmo bug já corrigido em doLoginFrota() na v2.0.7, mas essa função irmã nunca recebeu a mesma correção; só o caminho de erro resetava o botão, nunca o de sucesso. (2) Valor do frete aparecia escondido ("🔒 Diária") pra entregador logado pelo caminho NORMAL (não frota), quando deveria sempre ver o valor normalmente — doLoginFrota() grava esconderValor dentro do documento motoboys/{uid} (merge:true, v2.1.0); se esse entregador já foi membro de frota antes, esse campo antigo ficava salvo pra sempre no documento, e o login normal herdava esse resquício sem querer. Zerado explicitamente nos 2 pontos que populam os dados do motoboy fora do fluxo de frota (loadMbData e _watchPendingApproval). Também corrigida a versão exibida na tela de login, que já estava desatualizada (v2.0.8) mesmo antes dessas mudanças — o comentário de Revision já estava em v2.1.9.
+-->
+<!-- Revision: 2026-07-10 v2.1.9 - BUGFIX (relato Falcao — Kanban do lojista nunca mostrava "A caminho" pra entrega de frota, ficava travado em "Pronto" até pular direto pra "Entregue"): frota é baseada na loja — diferente do avulso, que pode aceitar remotamente e precisar se deslocar até a loja primeiro, aceitar já significa estar pegando o pedido ali mesmo. Transação de aceite pra frota agora grava status "picked" direto (não "assigned") — o Burger escuta esse status e atualiza o Kanban pra "A caminho" no mesmo instante do aceite, refletindo a realidade. Tela de entrega única já tinha lógica pronta pra esconder o botão "Confirmar Coleta" quando status já é "picked" — nenhuma mudança de UI necessária, só o dado.
+-->
+<!-- Revision: 2026-07-10 v2.1.8 - FEAT (pedido Falcao — corrigir botão voltar do Android, que não tinha tratamento nenhum e forçava reload/perda de contexto, gatilho real do bug corrigido em v2.1.7): mesmo padrão seguro já usado no Burger/Petshop — pilha de navegação (_navStack/_isPoppingNav) cobrindo telas (showScreen) e modais (openModal/closeModal), sem NUNCA chamar history.back() por conta própria (só reage a popstate de verdade, evitando repetir a corrida assíncrona que já causou perda de carrinho numa versão antiga do Burger). Fechar modal tocando fora dele (clique no fundo) agora passa por closeModal() em vez de mexer direto na classList, mantendo a pilha sempre sincronizada, senão o botão voltar precisaria de 2 toques depois de fechar um modal desse jeito. Declarações posicionadas ANTES de showScreen() (lição já aprendida antes: ordem de carregamento importa).
+-->
+<!-- Revision: 2026-07-10 v2.1.7 - BUGFIX CRÍTICO (relato Falcao — botão voltar do Android fazia a entrega ativa "sumir" pro entregador de frota, e o mesmo acontecia saindo e logando de novo; no Kanban do lojista a entrega continuava aparecendo atribuída normalmente): mbData (tanto no login normal quanto na restauração de sessão salva) era montado só a partir de frota/{codigo} — dados fixos do cadastro (nome, telefone, veículo) — nunca lia motoboys/{uid} pra recuperar activeOrderId/activeOrderIds. Resultado: TODO login (primeiro ou repetido) esquecia qualquer entrega em andamento, mesmo ela continuando 100% correta no Firestore — por isso o Kanban do lojista nunca mentiu, o dado nunca se perdeu de verdade, só não era recarregado de volta na tela do entregador. Corrigido nos dois caminhos (doLoginFrota e _tryRestoreFrotaSession) — busca motoboys/{uid} e recupera activeOrderId/activeOrderIds antes de entrar no app. Motoboy avulso (login email/senha) já lia certo, não tinha esse bug — só o caminho de frota (código de 6 dígitos) tinha o problema. NOTA: o botão voltar do Android continua sem tratamento próprio (força reload/navegação da página, que é o gatilho real do bug) — esse fix resolve a CONSEQUÊNCIA (dado sumindo), mas adicionar controle de navegação como o Burger/Petshop já têm (_navStack) seria a correção mais completa, se Falcao quiser priorizar depois.
+-->
+<!-- Revision: 2026-07-10 v2.1.6 - BUGFIX (relato+print Falcao — texto de distância/tempo cortando por cima do botão "+ Buscar mais" no topo da tela): .map-dist-badge usa position:absolute, mas o elemento pai (.info-card, na tela de entrega única E na de múltiplas entregas) não tinha position:relative — o selo "flutuava" sem referência de verdade, ancorando em algum ancestral bem mais acima na página, terminando sobreposto na barra azul do topo. Bug pré-existente na tela de entrega única também (não é específico de múltiplas entregas), só nunca tinha sido reportado. Corrigido adicionando position:relative nos dois wrappers específicos (#delivery-map-wrap, #multi-map-wrap) — não na classe genérica .info-card, que é usada em vários outros lugares do app sem esse problema.
+-->
+<!-- Revision: 2026-07-07 v2.1.5 - FEAT (pedido Falcao — entregador de frota é fixo na loja, recebe diária, não precisa ver valor por entrega; decisão 100% do lojista, no cadastro de frota do Burger): quando o lojista esconde o valor (padrão da loja ou exceção por entregador), _mbData.esconderValor vem já resolvido do cadastro de frota — Pedix Go só lê esse campo pronto, não precisa saber de padrão/exceção. Aplicado nas 3 telas que mostravam o valor: lista de pedidos disponíveis (mostra "🔒 Diária" no lugar do valor), tela de entrega única ativa, e tela de múltiplas entregas — nos três casos, só quando esconderValor=true. Só afeta frota — entregador avulso sempre vê o valor normalmente (login por email/senha não passa por esse campo).
+-->
+<!-- Revision: 2026-07-07 v2.1.4 - FEAT (pergunta+pedido Falcao — motoboy de frota é fixo na loja, sempre volta pra lá depois das entregas, diferente do avulso que pode seguir pra qualquer lugar): rota calculada pra múltiplas entregas agora fecha o ciclo — motoboy → loja → entrega 1 → entrega 2 → ... → volta pra loja no final. Antes a rota terminava na última entrega, sem calcular a volta.
+-->
+<!-- Revision: 2026-07-06 v2.1.3 - FEAT (pedido Falcao — motoboy de FROTA pode aceitar mais de uma entrega ao mesmo tempo, sem limite, escolhendo quantas quiser; motoboy AVULSO continua exatamente como antes, uma entrega por vez): novo campo motoboys/{uid}.activeOrderIds (lista) usado só pra frota, em paralelo ao activeOrderId (singular) que continua intacto pro avulso. Transação de aceite usa arrayUnion nesse campo pra frota; nova tela "Minhas Entregas" mostra a lista de paradas ativas com mapa Leaflet + rota OSRM passando por todos os pontos (loja + cada destino, na ordem em que foram aceitos) — mesma tecnologia já usada na entrega única, estendida pra múltiplos waypoints na mesma chamada da API. Cada entrega é confirmada individualmente ("✅ Entregue" por parada) via arrayRemove, sem afetar as outras que continuam ativas; grava em historico do mesmo jeito que a entrega única. Botão "+ Buscar mais" permite voltar pra tela de pedidos disponíveis e aceitar mais entregas mesmo já tendo ativas. Nenhuma mudança nas Regras do Firestore necessária — frota já é reconhecida como motoboy de verdade desde a correção de segurança anterior, e a permissão de atualizar a própria entrega já cobre esse fluxo.
+-->
+<!-- Revision: 2026-07-06 v2.1.2 - BUGFIX CRÍTICO (relato+prints Falcao — toda vez que abria o app, aparecia "Cadastro enviado!" sozinho, sem preencher nada, e criava aparência de cadastro "Pendente" no Gestor): bootApp() faz login anônimo automático no boot (signInAnonymously, necessário pra outras coisas, como ler frota/{codigo} antes do motoboy logar de verdade) — mas o onAuthStateChanged tratava QUALQUER sessão, incluindo essa anônima automática, como "usuário logado de verdade" e chamava loadMbData(uid), que não encontra motoboys/{uid} pra esse UID anônimo (nunca existiu cadastro nenhum) e mostra a tela de "Cadastro enviado" por engano. Corrigido checando user.isAnonymous — só trata como login de verdade quando NÃO é anônimo (motoboy avulso logado com email/senha de verdade).
+-->
+<!-- Revision: 2026-07-04 v2.1.1 - BUGFIX CRÍTICO (relato Falcao — motoboy que loga/fica online depois do pedido já estar "Pronto" não recebe o pedido): toggleOnline() já exige _gpsOk==true antes de deixar ativar o status online (correto), mas se o GPS falhar momentaneamente DEPOIS de já estar online (comum em local fechado — watchPosition dispara o callback de erro, _gpsOk vira false) e depois voltar a funcionar, nada reconectava o listener onSnapshot de pedidos disponíveis — startPolling() exige _gpsOk==true pra sequer criar o listener (if(!_online||!_gpsOk||!window._GO) return), então um pedido que já existia enquanto o GPS estava fora do ar ficava invisível pra sempre, mesmo com o motoboy online e o GPS já recuperado. Corrigido: o callback de sucesso do watchPosition agora detecta a transição de GPS-ruim-para-GPS-bom (_gpsWasOk) e chama startPolling() novamente se ainda não houver listener ativo, garantindo que pedidos já existentes apareçam assim que o GPS volta. -->
+<!-- Revision: 2026-07-03 v2.1.0 - BUGFIX (relato Falcao — entrega de frota aparecia no relatório do Burger com o UID anônimo cru como nome, sem chance de identificar o entregador): o vínculo uid↔frotaCodigo/nome só existia em memória (_frotaCodigo/mbData) durante a sessão e só era copiado pro Firestore no FIM da entrega (historico.frotaCodigo, v2.0.8) — se esse write falhasse (ex: app fechado no meio do caminho), o registro ficava órfão pra sempre, sem nada em motoboys/{uid} pra recuperar (confirmado no caso real: documento só tinha activeOrderId/lastActiveAt/online, gravados pelo toggle online). Corrigido gravando nome/frotaCodigo/tenantUid/tipo em motoboys/{uid} já no momento do login (doLoginFrota() e _tryRestoreFrotaSession()), mesmo padrão de escrita (setDoc merge:true) já usado pelo toggle online — nenhuma regra nova necessária. NOTA DE VERSIONAMENTO: v2.0.9→v2.1.0 (patch atingiu 9, sobe o minor), não v2.0.10. -->
+<!-- Revision: 2026-07-02 v2.0.9 - PENDENTE resolvido (item 2 da lista): screen-historico — barra de filtro de período (Hoje/Esta semana/Este mês/Tudo) ficava cortada/sobreposta pelo header azul fixo ao rolar a lista de entregas. Causa raiz: só a .topbar era sticky (position:sticky isolado); a .hist-period-bar ficava em fluxo normal logo abaixo dela e, ao rolar, passava por baixo da topbar (mesmo z-index:100), aparecendo cortada durante a transição em vez de permanecer visível. Corrigido agrupando topbar+hist-period-bar num wrapper .hist-sticky-head único, sticky no topo; agora só a lista de entregas (#hist-content) rola por baixo do grupo inteiro. .topbar interno passa a position:static (a stickiness agora é do wrapper). Reproduzido e confirmado visualmente via screenshot automatizado (Playwright, 3 posições de scroll) antes e depois do fix. Sintaxe validada com node --check (2 blocos de script). -->
+<!-- Revision: 2026-06-30 v2.0.8 - BUGFIX (relatório Frota Própria no Burger — entrega aparecia em 'Motoboys — Pedix Go' com UID anônimo como nome): efeito colateral do fix v2.0.7 (motoboyId passou a ser UID, necessário para as Rules, mas loadRepFrota() do Burger cruzava por motoboyId==código da frota). Corrigido adicionando dois campos ao payload de historico em doDeliver(): motoboyNome (nome do entregador — evita lookup em motoboys/{uid} que não existe pra frota) e frotaCodigo (o código de 6 dígitos — permite loadRepFrota() cruzar por código e loadRepMotoboys() excluir essas entregas da lista de externos). _frotaCodigo global adicionado e setado em doLoginFrota() e _tryRestoreFrotaSession(). Campos não gravados para motoboy avulso (undefined). Sintaxe validada com node --check. -->
+<!-- Revision: 2026-06-30 v2.0.7 - BUGFIX CRÍTICO (Frota Própria — "Missing or insufficient permissions" ao aceitar pedido + botão "Verificando..." travado): (1) Causa raiz do erro de permissão: doLoginFrota() usava o código de 6 dígitos como _mbId (comentário original na declaração de _mbId diz "UID do Firebase Auth" — invariante que todo o resto do app assume: motoboys/{_mbId}, historico por motoboyId==_mbId, e as Rules que exigem motoboyId==request.auth.uid). Como o código nunca é igual ao UID anônimo do signInAnonymously, confirmAccept() falhava ao gravar motoboyId:_mbId(código) em deliveries — Rules recusavam por não bater com request.auth.uid. Efeito colateral adicional: gravações em motoboys/{_mbId} (toggle online, recusados, etc) criavam documentos soltos/errados na coleção, já que motoboys/{código} nunca existe pra frota (só frota/{codigo}). Corrigido em doLoginFrota() e _tryRestoreFrotaSession(): id operacional passa a ser auth.currentUser.uid; o código continua sendo só a chave de busca em frota/{codigo}, nunca a identidade depois do login. (2) Botão "Entrar na frota →" travava em "Verificando..." pra sempre no caminho de SUCESSO de doLoginFrota() (só os caminhos de erro resetavam disabled/textContent) — invisível atrás da troca de tela, reaparecia travado ao deslogar e voltar pra aba Frota. Corrigido resetando o botão no sucesso + rede de segurança em doLogout() que reseta o botão da aba Frota sempre que volta pra screen-auth, independente da causa. Sintaxe validada com node --check. -->
+<!-- Revision: 2026-06-30 v2.0.6 - BUGFIX CRÍTICO (relato Falcao + print: "1ª entrega aceita e conclui, na 2ª trava na tela de confirmar"): renderActiveDelivery() só alternava style.display dos botões de ação a cada render, nunca restaurava disabled/textContent. confirmCollect() desabilita btn-collected e troca o texto para "Confirmando..." no início, só revertendo isso no catch (erro) — no caminho de sucesso o botão ficava preso desabilitado/com texto trocado, invisível atrás do display:none assim que a 1ª entrega avançava de etapa; ao aceitar a 2ª entrega, o mesmo botão reaparecia (display:block) já travado com o estado sujo da 1ª. mesmo padrão encontrado em btn-confirm-deliver (doDeliver()) — desabilitado no início e NUNCA reabilitado em lugar nenhum, nem sucesso nem erro (bug adicional: também travava a confirmação de entrega pra sempre se desse erro de rede uma única vez, sem chance de retry na mesma corrida). Corrigido centralizando o reset em renderActiveDelivery(): todo render do estado ativo garante os dois botões limpos (disabled=false + texto padrão), independente de qual caminho gerou o estado anterior; doDeliver() também reabilita btn-confirm-deliver no catch. FEAT (pedido Falcao): botão "Ir à loja" (novo id btn-nav-store) agora trava (disabled + opacidade 0.4) depois da coleta confirmada, mesmo padrão visual já usado em "Ir ao cliente" — evita o motoboy clicar achando que ainda precisa voltar à loja depois de já ter coletado. Sintaxe validada com node --check. -->
+<!-- Revision: 2026-06-30 v2.0.5 - SECURITY (varredura complementar à auditoria v2.0.3 — escopo Pedix, propagação do achado de e.message no Gestor v1.3.7): 1 ponto residual de XSS encontrado e corrigido — loadHistorico() exibia e.message (mensagem de erro do catch) sem escHtml() no estado de erro da tela de histórico; mesma classe do bug já corrigido no Gestor. Demais 9 blocos de innerHTML revisados nesta varredura e confirmados já protegidos (escHtml() em todos os campos de texto livre do Firestore: storeName, storeAddr, destAddr, orderId, nome da loja). dbg() (painel de debug interno) usa apenas strings estáticas e IDs internos (uid, screen id) — sem risco, não alterado. Nenhuma duplicação de código equivalente ao padrão promoMap/banner-de-erro encontrada — Pedix Go não compartilha essas estruturas com os apps de cardápio. Sintaxe validada com node --check. -->
+<!-- Revision: 2026-06-29 v2.0.4 - BUGFIX: (Bug 1) botao "Ir ao cliente" bloqueado ate coleta confirmada — btn-nav-dest recebe id e e desabilitado (disabled+opacidade 0.4) em renderActiveDelivery() enquanto status!="picked"; reabilitado automaticamente apos confirmCollect() chamar renderActiveDelivery(). (Bug 2) trava ao confirmar entrega corrigida — doDeliver() agora chama closeModal("modal-deliver") e desabilita o botao de confirmacao imediatamente no inicio, antes dos awaits do Firestore; padrao identico ao ja adotado em confirmCollect(); botao recebeu id="btn-confirm-deliver" para isso. (Bug 3) tela "Cadastro enviado!" nao sai ao reabrir o app — adicionado onSnapshot em tempo real no documento motoboys/{uid} enquanto motoboy esta na screen-pending (_watchPendingApproval); quando SuperAdmin aprova (status muda de "pending" para "active"), app detecta automaticamente, encerra o listener e chama enterApp() sem precisar fechar e reabrir; variavel _pendingApprovalUnsub adicionada ao estado global. -->
+<!-- Revision: 2026-06-29 v2.0.3 - AUDITORIA DE SEGURANÇA (Protocolo PEDIX): (1) QUERIES COMPOSTAS — 2 queries com indices compostos inexistentes corrigidas: loadHistorico() usava where(motoboyId)+where(deliveredAt>=desde) — substituida por query simples em motoboyId com filtro de data em memoria via .filter(); _histConfirmarLote() usava where(motoboyId)+where(storeName) — substituida por query simples em motoboyId com filtro de storeName+storeAddr em memoria, corrigindo tambem o filtro que antes nao comparava storeName (so storeAddr). (2) INJECAO VIA APOSTROFO EM onclick — _histConfirmarLote() recebia lojaKey (string com nome da loja e endereco, potencialmente com apostrofo) via onclick — corrigido pela Estrategia A: parametro trocado para lojaIdx (indice numerico), chave resolvida internamente via window._histLojasCache (array populado antes do innerHTML). (3) XSS — varredura completa em 2 passagens: 7 blocos innerHTML auditados; todos os campos de texto livre do Firestore (storeName, storeAddr, destAddr, orderId, nome) protegidos por escHtml() ou escHtml() ja existente; campos numericos e IDs do Firestore confirmados seguros sem escape adicional; nenhuma correcao necessaria de XSS alem do apostrofo ja coberto no item 2. (4) _doSave/_isLojistaAuth: nao aplicavel — Pedix Go e app de motoboy, sem escrita de appdata de tenant. Sintaxe validada com node --check antes e depois de cada etapa. -->
+<!-- Revision: 2026-06-29 v2.0.2 - BUGFIX: (Bug 1) pedidos aparecem e somem corrigido — polling setInterval de 30s substituido por onSnapshot do Firestore em tempo real; pedidos entram e saem da lista instantaneamente quando o status muda no servidor, sem piscar nem esperar ciclo; stopPolling/startPolling mantidos como API publica para compatibilidade com resto do codigo. (Bug 2) distancia em km agora usa OSRM (rota real pelas ruas) em vez de Haversine (linha reta); cards renderizam primeiro com estimativa em linha reta como placeholder e atualizam automaticamente quando OSRM responder em background (timeout 4s, fallback silencioso para Haversine se OSRM falhar); label muda de "~X.Xkm" para "X.Xkm pelas ruas" apos retorno do OSRM; texto "Atualizando a cada 30s" substituido por "Atualizando em tempo real". _deliveriesUnsub adicionado ao estado global para gerenciar unsubscribe do listener. -->
+<!-- Revision: 2026-06-29 v2.0.1 - BUGFIX+FEAT: (Bug 3) fluxo de modal por etapa — markCollected() agora abre modal-collect dedicado ("Confirmou a coleta?") em vez de executar diretamente; openDeliverModal() passa a usar modal-deliver dedicado ("Entrega concluida?") em vez de reaproveitar o modal-accept com texto trocado; dois novos modais HTML adicionados (modal-collect, modal-deliver); confirmCollect() criado para executar o updateDoc apos confirmacao no modal. (Bug 4) loop de aceite no Pedixgo corrigido — stopPolling() agora e chamado ANTES da transacao de aceite, eliminando a janela de tempo em que fetchDeliveries podia rodar enquanto o aceite estava em andamento e re-exibir o mesmo pedido como "waiting"; botao de aceite desabilitado imediatamente com feedback visual "Aceitando..."; _pendingAcceptId salvo em variavel local antes de ser zerado para evitar passar null para loadActiveDelivery; em caso de falha, startPolling() e retomado corretamente. (Mapa) mapa Leaflet com rota OSRM adicionado na tela de entrega ativa mostrando posicao do motoboy, loja e cliente em tempo real (ver v2.0.0). CSP atualizada para liberar unpkg.com, *.tile.openstreetmap.org e router.project-osrm.org. -->
+<!-- Revision: 2026-06-26 v2.0.0 - BUGFIX (Frota — auth perdida entre boot e clique): diagnóstico ao vivo (alerts/logs em tela) confirmou que signInAnonymously() no boot tinha sucesso (UID gerado, auth.currentUser correto IMEDIATAMENTE após, mesma referência de objeto `auth`, persistência configurada como browserLocalPersistence sem erro) — mas, no momento do clique em "Entrar na frota" (doLoginFrota) ou no boot seguinte (_tryRestoreFrotaSession), auth.currentUser já estava de volta a null, causando "Missing or insufficient permissions" mesmo com Anonymous Auth habilitado no Firebase Console (confirmado) e sem nenhum signOut() no caminho. Causa raiz exata não isolada (hipótese mais provável: timing do IndexedDB interno do SDK do Firebase Auth nesse ambiente específico) — corrigido de forma robusta independente da causa: doLoginFrota() e _tryRestoreFrotaSession() agora verificam auth.currentUser ATIVAMENTE no momento do uso e chamam signInAnonymously() de novo se necessário, em vez de confiar que a sessão criada no boot ainda é válida mais tarde. window._goAuthReady removido (não é mais necessário); signInAnonymously no boot mantido como otimização não-crítica. -->
+<!-- Revision: 2026-06-26 v1.9.9 - BUGFIX (Frota — race condition de auth): signInAnonymously() no boot não era esperado em lugar nenhum — window._goAuthReady (Promise que sempre resolve, nunca rejeita) criado para isso. doLoginFrota() e _tryRestoreFrotaSession() agora fazem "await window._goAuthReady" antes de ler frota/{codigo}; antes, um clique rápido no botão "Entrar na frota" (ou o próprio boot do app, no caso de sessão de frota salva) podia disparar a leitura com request.auth ainda null, causando "Missing or insufficient permissions" mesmo com Anonymous Auth habilitado no console do Firebase (confirmado habilitado — não era a causa raiz). Bug secundário identificado em _tryRestoreFrotaSession(): catch genérico engolia esse erro de permissão e mandava o motoboy de volta à tela de login silenciosamente, sem nenhuma mensagem — corrigido pelo mesmo fix. -->
+<!-- Revision: 2026-06-26 v1.9.8 - FEAT (Frota Própria — login por código): (1) Nova aba "🏍 Frota" na tela de autenticação — entregador digita código de 6 dígitos numéricos gerado pelo lojista no Burger; (2) doLoginFrota() valida o código em frota/{codigo} no pedix-go, verifica se está ativo, salva sessão em localStorage; (3) _tryRestoreFrotaSession() — no boot, se não houver sessão Firebase Auth, tenta restaurar sessão de frota salva; (4) fetchDeliveries: entregador da frota vê só pedidos do próprio tenant (filtra por tenantUid); motoboy avulso não vê pedidos com frotaOnly:true; filtro de expiresAt (TTL 30min) adicionado; (5) doLogout: limpa sessão de frota do localStorage sem chamar signOut do Firebase Auth (frota não usa Auth); (6) switchTab atualizado para 3 abas; (7) FIX: signInAnonymously adicionado ao boot — sem sessão anônima o Firestore recusava leitura de frota/{codigo} com "Missing permissions" antes mesmo do login. -->
+<!-- Revision: 2026-06-26 v1.9.7 - FEAT: raio de busca de pedidos configurável pelo motoboy — 3 opções (5km / 8km / 12km) via botões na tela principal, abaixo do toggle online/offline. Raio salvo em localStorage (persiste entre sessões). Rebusca pedidos imediatamente ao trocar o raio se estiver online. SEARCH_RADIUS_KM deixou de ser constante fixa e passa a ler localStorage com fallback para 5km. -->
+<!-- Revision: 2026-06-24 v1.9.6 - BUGFIX: doDeliver() agora grava tenantUid no documento historico, copiado de _activeDelivery.tenantUid (já chegava no documento deliveries, criado pelo Burger em _bridgeCreateDelivery, mas nunca era propagado ao historico). Sem este campo, o relatório "🛵 Motoboys — Pedix Go" no painel admin do Burger (v1.9.4, loadRepMotoboys) filtrava por tenantUid e sempre retornava vazio — confirmado por verificação cruzada entre os dois apps. Históricos já existentes antes desta correção não têm o campo (não migrado, conforme decisão de produto); só entregas concluídas a partir desta versão aparecem no relatório. -->
+<!-- Revision: 2026-06-24 v1.9.5 - FEAT: filtro de período no histórico do motoboy — 4 opções (Hoje / Esta semana / Este mês / Tudo) via barra de botões no topo da tela screen-historico; loadHistorico(periodo) recebe parâmetro e filtra deliveredAt via query Firestore (where deliveredAt >= desde); _histPeriodo guarda período ativo para que confirmar pagamento e confirmar lote recarreguem no mesmo período; cada card de loja agora mostra também o total bruto além do total pendente; hora adicionada ao timestamp de cada entrega na lista. -->
+<!-- Revision: 2026-06-23 v1.9.4 - BUGFIX+FEAT (AUDIT — continuação): bug #8: motoboy agora confirma manualmente o recebimento de cada entrega no histórico (_histConfirmarPagamento) ou em lote por loja (_histConfirmarLote, botão "Confirmar todas dessa loja") — campo isPaid gravado em historico/{id}; "Total a receber" passa a somar só entregas com isPaid!==true, em vez de crescer para sempre sem nunca zerar. Pendente: Rule de historico.update precisa liberar o motoboy para alterar isPaid/paidAt do próprio histórico — ver PACOTE_RULES_FIREBASE.md. -->
+<!-- Revision: 2026-06-23 - BUGFIX (AUDIT — sessão de correção): (1) bug #3: _recusados agora persiste em Firestore (motoboys/{uid}.recusados) via _saveRecusados(), carregado em enterApp() — antes era só memória e resetava a cada reload do PWA, fazendo pedido recusado reaparecer antes do prazo de 30min; (2) bug #9 (grave, lado Pedix Go): loadActiveDelivery() agora escuta em tempo real (onSnapshot) o delivery ativo via _watchActiveDelivery() — se a loja cancelar o pedido (status "cancelled_by_store", ver bridge no Burger v1.9.1), o motoboy recebe toast e é liberado automaticamente (_handleDeliveryCancelledByStore()); listener é encerrado corretamente em doDeliver()/confirmCancel(). Pendente: bugs #1/#2 (Rules de motoboys.create e deliveries.update) e bug #8 (total a receber nunca zerado) — ver pacote de Rules e nota de produto entregues separadamente. -->
+<!-- Revision: 2026-06-23 v1.9.2 - BUGFIX: corrigido erro "Cannot read properties of null (reading 'classList')" — openModal() e closeModal() agora verificam se o elemento existe antes de acessar classList, evitando crash quando ID de modal não encontrado no DOM; listeners de fechar modal ao clicar fora movidos para dentro de DOMContentLoaded garantindo que os elementos .modal-bg já existam no momento da execução. -->
+<!-- Revision: 2026-06-23 v1.9.3 - BUGFIX: corrigido erro "Cannot read properties of null (reading 'classList')" remanescente — funções toast(), timeout de segurança e switchTab() agora verificam null antes de acessar classList; correção completa de todos os getElementById sem guarda no arquivo. -->
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<!-- [SEGURANÇA 2026-06-22] Content Security Policy -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://www.gstatic.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://www.emailjs.com https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; font-src 'self' https://fonts.gstatic.com https://unpkg.com; img-src 'self' data: blob: https://i.ibb.co https://api.imgbb.com https://storage.googleapis.com https://*.firebasestorage.app https://lh3.googleusercontent.com https://maps.googleapis.com https://*.tile.openstreetmap.org https://*.openstreetmap.org; connect-src 'self' https://firestore.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://storage.googleapis.com https://api.imgbb.com https://viacep.com.br https://nominatim.openstreetmap.org https://api.emailjs.com https://router.project-osrm.org wss://*.firebaseio.com; worker-src 'self' blob:; object-src 'none'; base-uri 'self'">
+<meta http-equiv="X-Content-Type-Options" content="nosniff">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Pedix Go</title>
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Pedix Go">
+<meta name="theme-color" content="#2563eb">
+<link rel="manifest" href="manifest.json">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Poppins:wght@600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<!-- ═══════════════════════════════════════════════
+     FIREBASE DO PEDIX GO
+     ═══════════════════════════════════════════════ -->
+<script type="module">
+import { initializeApp }                                          from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, setDoc, getDoc, addDoc, collection,
+         getDocs, query, where, runTransaction, updateDoc, onSnapshot,
+         arrayUnion, arrayRemove }       from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getAuth, createUserWithEmailAndPassword,
+         signInWithEmailAndPassword, signOut,
+         sendPasswordResetEmail, onAuthStateChanged,
+         signInAnonymously, setPersistence,
+         browserLocalPersistence, inMemoryPersistence } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+const firebaseConfig = {
+  apiKey:            "AIzaSyDzKEeWt8fOZcZiDVlU3VYTx8q5_BB2jtg",
+  authDomain:        "pedix-go.firebaseapp.com",
+  projectId:         "pedix-go",
+  storageBucket:     "pedix-go.firebasestorage.app",
+  messagingSenderId: "845932513086",
+  appId:             "1:845932513086:web:4e15b28c0a7f0ecc14ce6f"
+};
+
+try {
+  const app  = initializeApp(firebaseConfig);
+  // v2.2.3 FEAT CRÍTICO (relato Falcao — "se a internet cair na hora, não
+  // cria nada, e todos ficam sem saber os pedidos; tem que ter a
+  // persistência de existir mesmo quando a internet falhar até ela
+  // voltar" — especialmente importante AQUI: o entregador está sempre em
+  // movimento, entrando em prédios, trocando de torre de celular — muito
+  // mais sujeito a perder conexão momentaneamente do que a loja parada
+  // com wifi): getFirestore() puro não guarda nada em disco — se a
+  // conexão cair bem no momento de aceitar/confirmar uma entrega, e o
+  // app fechar/recarregar antes da internet voltar, a ação pendente se
+  // perde de vez. initializeFirestore() com persistentLocalCache ativa
+  // um cache em IndexedDB — leituras batem no cache local primeiro
+  // (funciona offline), e escritas feitas offline ficam na fila e
+  // sincronizam automaticamente quando a conexão voltar.
+  let db;
+  try{
+    db=initializeFirestore(app,{localCache:persistentLocalCache({tabManager:persistentMultipleTabManager()})});
+  }catch(_dbErr){
+    console.warn('[Pedix Go] persistência offline indisponível, seguindo sem cache local:', _dbErr.message);
+    db=getFirestore(app);
+  }
+  const auth = getAuth(app);
+  window._GO = {
+    db, auth,
+    doc, setDoc, getDoc, addDoc, collection, getDocs,
+    query, where, runTransaction, updateDoc, onSnapshot,
+    arrayUnion, arrayRemove,
+    createUserWithEmailAndPassword, signInWithEmailAndPassword,
+    signOut, sendPasswordResetEmail, onAuthStateChanged,
+    signInAnonymously
+  };
+  // v2.0.0: tenta autenticação anônima antecipada no boot (otimização —
+  // se já estiver pronta quando o motoboy clicar, a leitura é instantânea).
+  // NÃO é mais uma dependência crítica: doLoginFrota() e
+  // _tryRestoreFrotaSession() verificam auth.currentUser ativamente e
+  // autenticam de novo se necessário, no momento exato do uso. Isso evita
+  // depender da sessão do boot ainda estar válida mais tarde — em alguns
+  // ambientes ela deixa de estar (auth.currentUser volta a null) entre o
+  // boot e o clique, mesmo com a mesma referência de objeto `auth` e sem
+  // nenhum signOut() explícito no caminho — causa não localizada com
+  // certeza (timing do IndexedDB do SDK é a hipótese mais provável), mas
+  // contornada de forma robusta ao não depender mais desse estado.
+  setPersistence(auth, browserLocalPersistence).catch(()=>{});
+  signInAnonymously(auth).catch(e=>console.warn("[Pedix Go] signInAnonymously (boot) falhou:",e.message));
+  window._goReady = true;
+  window.dispatchEvent(new Event("goReady"));
+} catch(e) {
+  window._goError = e.message;
+  window.dispatchEvent(new Event("goError"));
+}
+</script>
+
+<style>
+/* ── TOKENS ── */
+:root{
+  --bg:     #f0f4ff;
+  --bg2:    #ffffff;
+  --bg3:    #f5f7ff;
+  --bg4:    #eaefff;
+  --border: #dde3f5;
+  --border2:#c8d1ed;
+  --text:   #0f1535;
+  --muted:  #8590b8;
+  --muted2: #6070a8;
+  --green:  #10b981;
+  --green2: #059669;
+  --yellow: #f59e0b;
+  --yellow2:#d97706;
+  --red:    #ef4444;
+  --orange: #f97316;
+  --blue:   #2563eb;
+  --blue2:  #1d4ed8;
+  --blue-lt:#eff3ff;
+  --shadow: 0 2px 12px rgba(37,99,235,.10);
+  --shadow2:0 4px 24px rgba(37,99,235,.14);
+  --font-head: 'Poppins', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --radius: 16px;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--font-body);overflow:hidden}
+button{cursor:pointer;font-family:var(--font-body);border:none;outline:none}
+input,select{font-family:var(--font-body);outline:none}
+::-webkit-scrollbar{width:3px}::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
+
+/* ── LOADING ── */
+#screen-loading{
+  background:var(--blue);z-index:100;
+  align-items:center;justify-content:center;gap:24px;
+}
+.ld-logo{font-family:var(--font-head);font-size:42px;font-weight:900;letter-spacing:-1px;line-height:1;color:#fff}
+.ld-logo span{color:rgba(255,255,255,.5)}
+.ld-sub{font-size:13px;color:rgba(255,255,255,.6);letter-spacing:.5px}
+.ld-spinner{width:36px;height:36px;border:3px solid rgba(255,255,255,.2);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── SCREENS ── */
+.screen{display:none;position:fixed;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch}
+.screen.active{display:flex;flex-direction:column}
+
+/* ── AUTH ── */
+#screen-auth{
+  background:var(--bg);
+  align-items:center;justify-content:center;padding:24px;
+}
+.auth-box{width:100%;max-width:380px}
+.auth-logo{font-family:var(--font-head);font-size:48px;font-weight:900;letter-spacing:-2px;margin-bottom:4px;color:var(--blue)}
+.auth-logo span{color:var(--text);opacity:.35}
+.auth-tagline{font-size:13px;color:var(--muted);margin-bottom:32px;font-weight:500}
+.auth-tabs{display:flex;gap:0;background:var(--bg4);border-radius:12px;padding:4px;margin-bottom:24px}
+.auth-tab{flex:1;padding:10px;border-radius:9px;background:none;color:var(--muted);font-size:13px;font-weight:700;font-family:var(--font-body);letter-spacing:.3px;transition:all .2s}
+.auth-tab.active{background:var(--bg2);color:var(--blue);box-shadow:var(--shadow)}
+.auth-section{display:none}.auth-section.active{display:block}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:11px;font-weight:700;color:var(--muted2);text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px}
+.field-pass{position:relative}
+.field-pass input{padding-right:44px!important}
+.eye-btn{position:absolute;right:14px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;padding:4px;line-height:1}
+.field input{
+  width:100%;background:var(--bg2);border:1.5px solid var(--border);border-radius:12px;
+  padding:14px 16px;color:var(--text);font-size:15px;transition:border-color .2s;font-weight:500;
+}
+.field input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(37,99,235,.08)}
+.field input::placeholder{color:var(--muted)}
+.btn-main{
+  width:100%;background:var(--blue);border-radius:12px;padding:16px;
+  color:#fff;font-size:15px;font-weight:700;font-family:var(--font-body);
+  letter-spacing:.3px;transition:all .2s;margin-top:4px;box-shadow:var(--shadow2);
+}
+.btn-main:hover{background:var(--blue2)}
+.btn-main:active{transform:scale(.98)}
+.btn-main:disabled{opacity:.5;pointer-events:none}
+.btn-ghost{
+  width:100%;background:var(--bg3);border:1.5px solid var(--border);border-radius:12px;
+  padding:14px;color:var(--muted2);font-size:14px;font-weight:600;font-family:var(--font-body);
+  transition:all .2s;margin-top:8px;
+}
+.btn-ghost:hover{border-color:var(--blue);color:var(--blue);background:var(--blue-lt)}
+.btn-forgot{background:none;border:none;color:var(--muted);font-size:12px;text-decoration:underline;margin-top:10px;display:block;text-align:center;cursor:pointer;width:100%;font-weight:500}
+.btn-forgot:hover{color:var(--blue)}
+.auth-msg{font-size:13px;text-align:center;margin-top:10px;min-height:18px;line-height:1.5}
+.auth-msg.err{color:var(--red)}
+.auth-msg.ok{color:var(--green)}
+
+/* ── PENDING ── */
+#screen-pending{
+  background:var(--bg);align-items:center;justify-content:center;padding:24px;text-align:center;
+}
+.pending-ico{font-size:64px;margin-bottom:24px;animation:float 3s ease-in-out infinite}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+.pending-title{font-family:var(--font-head);font-size:28px;font-weight:800;margin-bottom:12px;color:var(--text)}
+.pending-sub{font-size:14px;color:var(--muted);line-height:1.7;max-width:280px;margin:0 auto 32px}
+
+/* ── REJECTED ── */
+#screen-rejected{
+  background:var(--bg);align-items:center;justify-content:center;padding:24px;text-align:center;
+}
+.rejected-ico{font-size:64px;margin-bottom:24px}
+.rejected-title{font-family:var(--font-head);font-size:28px;font-weight:800;margin-bottom:12px;color:var(--red)}
+.rejected-sub{font-size:14px;color:var(--muted);line-height:1.7;max-width:280px;margin:0 auto 32px}
+
+/* ── DASHBOARD ── */
+#screen-dash{background:var(--bg);padding-bottom:80px}
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 20px;background:var(--blue);
+  position:sticky;top:0;z-index:100;
+}
+.tb-logo{font-family:var(--font-head);font-size:22px;font-weight:900;letter-spacing:-1px;color:#fff}
+.tb-logo span{opacity:.5}
+.tb-right{display:flex;align-items:center;gap:8px}
+.btn-logout{background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.25);border-radius:8px;padding:6px 12px;color:#fff;font-size:12px;font-weight:600;font-family:var(--font-body);transition:all .2s}
+.btn-logout:hover{background:rgba(255,255,255,.25)}
+
+/* Status toggle */
+.status-hero{
+  margin:20px;background:var(--bg2);border:1px solid var(--border);
+  border-radius:var(--radius);padding:24px;box-shadow:var(--shadow);
+}
+.status-row{display:flex;align-items:center;justify-content:space-between;gap:16px}
+.status-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;font-weight:700}
+.status-val{font-family:var(--font-head);font-size:30px;font-weight:900;letter-spacing:-1px;transition:color .3s}
+.status-val.online{color:var(--green)}
+.status-val.offline{color:var(--muted)}
+.status-sub{font-size:12px;color:var(--muted);margin-top:4px;font-weight:500}
+.toggle-wrap{flex-shrink:0}
+.toggle{position:relative;width:68px;height:36px;display:inline-block}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.toggle-track{
+  position:absolute;inset:0;border-radius:36px;background:var(--bg4);
+  border:1.5px solid var(--border2);cursor:pointer;transition:all .3s;
+}
+.toggle-track::after{
+  content:'';position:absolute;height:28px;width:28px;left:3px;top:3px;
+  border-radius:50%;background:var(--muted);transition:all .3s;
+}
+.toggle input:checked + .toggle-track{background:var(--green);border-color:var(--green2)}
+.toggle input:checked + .toggle-track::after{transform:translateX(32px);background:#fff}
+
+/* Session info */
+.session-bar{
+  margin:0 20px 16px;background:var(--blue-lt);border:1px solid rgba(37,99,235,.15);
+  border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:500;
+}
+.session-dot{width:8px;height:8px;border-radius:50%;background:var(--blue);flex-shrink:0}
+
+/* GPS info */
+/* v1.9.7 — seletor de raio */
+.raio-bar{margin:0 20px 14px;display:flex;align-items:center;gap:8px}
+.raio-label{font-size:11px;font-weight:700;color:var(--muted);white-space:nowrap}
+.raio-btn{flex:1;padding:8px 4px;border-radius:10px;border:1.5px solid var(--border);background:var(--bg2);color:var(--muted2);font-size:12px;font-weight:800;font-family:var(--font-body);cursor:pointer;transition:all .2s;text-align:center}
+.raio-btn.active{background:var(--blue-lt);border-color:var(--blue);color:var(--blue)}
+.gps-bar{
+  margin:0 20px 16px;background:var(--bg2);border:1px solid var(--border);
+  border-radius:10px;padding:10px 14px;display:flex;align-items:center;gap:10px;font-size:12px;font-weight:500;
+}
+.gps-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.gps-dot.ok{background:var(--green)}
+.gps-dot.err{background:var(--red)}
+.gps-dot.wait{background:var(--yellow);animation:pulse 1.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* Section */
+.section-head{display:flex;align-items:center;justify-content:space-between;padding:0 20px;margin-bottom:12px}
+.section-title{font-family:var(--font-head);font-size:18px;font-weight:800;letter-spacing:-.3px;color:var(--text)}
+.section-count{font-size:12px;color:var(--blue);background:var(--blue-lt);border:1px solid rgba(37,99,235,.2);border-radius:20px;padding:3px 10px;font-weight:700}
+
+/* Delivery cards */
+.deliveries-list{padding:0 20px;display:flex;flex-direction:column;gap:12px}
+.del-card{
+  background:var(--bg2);border:1.5px solid var(--border);border-radius:var(--radius);
+  padding:18px;cursor:pointer;transition:border-color .2s,transform .15s,box-shadow .2s;box-shadow:var(--shadow);
+}
+.del-card:hover{border-color:var(--blue);transform:translateY(-2px);box-shadow:var(--shadow2)}
+.del-card-head{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:14px;gap:12px}
+.del-card-store{font-family:var(--font-head);font-size:19px;font-weight:800;letter-spacing:-.3px;line-height:1.1;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.del-card-id{font-size:10px;color:var(--muted);margin-top:3px;font-family:monospace}
+.del-fee{font-family:var(--font-head);font-size:26px;font-weight:900;color:var(--green);letter-spacing:-1px;white-space:nowrap}
+.del-fee span{font-size:13px;font-weight:600;color:var(--muted)}
+.del-route{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+.del-route-item{display:flex;align-items:flex-start;gap:10px;font-size:13px}
+.del-route-ico{width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;flex-shrink:0;margin-top:1px}
+.del-route-ico.origin{background:rgba(245,158,11,.15);color:var(--yellow)}
+.del-route-ico.dest{background:rgba(16,185,129,.15);color:var(--green)}
+.del-route-addr{color:var(--muted2);line-height:1.4;flex:1;font-weight:500}
+.del-dist{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;font-weight:500}
+.del-dist-dot{width:4px;height:4px;border-radius:50%;background:var(--border2)}
+.btn-accept{
+  width:100%;background:var(--blue);border-radius:10px;padding:14px;
+  color:#fff;font-size:15px;font-weight:700;font-family:var(--font-body);letter-spacing:.3px;
+  transition:all .2s;box-shadow:0 4px 12px rgba(37,99,235,.3);
+}
+.btn-accept:hover{background:var(--blue2)}
+.btn-accept:active{transform:scale(.98)}
+.btn-accept:disabled{opacity:.5;pointer-events:none}
+.btn-recusar{
+  background:var(--bg3);border:1.5px solid var(--border);border-radius:10px;
+  padding:14px 16px;color:var(--muted);font-size:15px;font-weight:700;
+  transition:all .2s;flex-shrink:0;
+}
+.btn-recusar:hover{border-color:var(--red);color:var(--red);background:rgba(239,68,68,.06)}
+
+/* Empty state */
+.empty-state{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  padding:60px 24px;text-align:center;
+}
+.empty-ico{font-size:48px;margin-bottom:16px;opacity:.4}
+.empty-txt{font-size:14px;color:var(--muted);line-height:1.7;font-weight:500}
+
+/* ── TELA ENTREGA ATIVA ── */
+#screen-delivery{background:var(--bg)}
+.delivery-topbar{
+  padding:16px 20px;background:var(--blue);
+  display:flex;align-items:center;gap:12px;
+}
+.delivery-title{font-family:var(--font-head);font-size:20px;font-weight:800;letter-spacing:-.3px;color:#fff}
+.delivery-badge{
+  margin-left:auto;font-size:11px;font-weight:700;padding:5px 12px;border-radius:20px;
+  font-family:var(--font-body);letter-spacing:.3px;
+}
+.delivery-badge.assigned{background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.3)}
+.delivery-badge.picked{background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.25)}
+
+.delivery-content{padding:20px;display:flex;flex-direction:column;gap:16px;padding-bottom:100px}
+
+/* Steps */
+.steps-bar{display:flex;align-items:center;gap:0;margin-bottom:4px}
+.step-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;position:relative}
+.step-item:not(:last-child)::after{
+  content:'';position:absolute;top:14px;left:50%;width:100%;height:2px;background:var(--border2);z-index:0;
+}
+.step-item.done::after{background:var(--green)}
+.step-dot{
+  width:28px;height:28px;border-radius:50%;border:2px solid var(--border2);
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;
+  background:var(--bg2);z-index:1;position:relative;transition:all .3s;color:var(--muted);
+}
+.step-item.active .step-dot{border-color:var(--blue);background:var(--blue);color:#fff}
+.step-item.done .step-dot{border-color:var(--green);background:var(--green);color:#fff}
+.step-lbl{font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.5px}
+.step-item.active .step-lbl{color:var(--blue)}
+.step-item.done .step-lbl{color:var(--green)}
+
+/* Info card */
+.info-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:18px;box-shadow:var(--shadow)}
+.info-card-title{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px}
+.info-row{display:flex;align-items:flex-start;gap:12px;margin-bottom:12px}
+.info-row:last-child{margin-bottom:0}
+.info-ico{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0}
+.info-ico.store{background:rgba(37,99,235,.1)}
+.info-ico.dest{background:rgba(16,185,129,.1)}
+.info-ico.fee{background:rgba(16,185,129,.1)}
+.info-label{font-size:11px;color:var(--muted);margin-bottom:2px;font-weight:600}
+.info-val{font-size:14px;font-weight:700;color:var(--text)}
+
+/* Nav buttons */
+.nav-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;gap:12px;box-shadow:var(--shadow)}
+.btn-nav{
+  flex:1;border-radius:10px;padding:14px;font-size:13px;font-weight:700;
+  font-family:var(--font-body);letter-spacing:.3px;display:flex;align-items:center;
+  justify-content:center;gap:8px;transition:all .2s;
+}
+.btn-nav.origin{background:rgba(245,158,11,.1);border:1.5px solid rgba(245,158,11,.3);color:var(--yellow)}
+.btn-nav.dest{background:rgba(37,99,235,.08);border:1.5px solid rgba(37,99,235,.25);color:var(--blue)}
+.btn-nav:hover{opacity:.85}
+.btn-nav:active{transform:scale(.97)}
+
+/* Action buttons */
+.action-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow)}
+.btn-step{
+  width:100%;border-radius:12px;padding:16px;font-size:16px;font-weight:800;
+  font-family:var(--font-body);letter-spacing:.3px;transition:all .2s;
+}
+.btn-step.collect{background:var(--blue);color:#fff;box-shadow:0 4px 12px rgba(37,99,235,.3)}
+.btn-step.deliver{background:var(--green);color:#fff;box-shadow:0 4px 12px rgba(16,185,129,.3)}
+.btn-step:hover{opacity:.9}
+.btn-step:active{transform:scale(.98)}
+.btn-step:disabled{opacity:.4;pointer-events:none}
+.btn-cancel{
+  width:100%;border-radius:12px;padding:13px;font-size:13px;font-weight:600;
+  font-family:var(--font-body);background:none;border:1.5px solid var(--border);
+  color:var(--muted);transition:all .2s;
+}
+.btn-cancel:hover{border-color:var(--red);color:var(--red);background:rgba(239,68,68,.04)}
+
+/* ── HISTÓRICO ── */
+/* v2.0.9 FIX: wrapper sticky agrupando topbar + hist-period-bar (ver comentário
+   no HTML). A topbar mantém seu próprio background opaco; aqui o wrapper só
+   precisa de background para a faixa da hist-period-bar não deixar o conteúdo
+   da lista aparecer por baixo enquanto ela rola por trás do grupo fixo. */
+.hist-sticky-head{
+  position:sticky;top:0;z-index:100;background:var(--bg);
+}
+.hist-sticky-head .topbar{position:static}
+.hist-period-bar{
+  display:flex;gap:8px;padding:0 20px 16px;overflow-x:auto;-webkit-overflow-scrolling:touch;
+  scrollbar-width:none;background:var(--bg);
+}
+.hist-period-bar::-webkit-scrollbar{display:none}
+.hist-period-btn{
+  flex-shrink:0;padding:8px 18px;border-radius:20px;font-size:13px;font-weight:700;
+  font-family:var(--font-body);border:1.5px solid var(--border);background:var(--bg2);
+  color:var(--muted2);transition:all .2s;cursor:pointer;
+}
+.hist-period-btn.active{
+  background:var(--blue);border-color:var(--blue);color:#fff;
+  box-shadow:0 2px 8px rgba(37,99,235,.3);
+}
+.hist-total{
+  background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:24px;text-align:center;box-shadow:var(--shadow);
+}
+.hist-card{
+  background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);
+}
+.hist-card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.hist-entregas{display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--border);padding-top:12px}
+.hist-item{display:flex;align-items:center;justify-content:space-between;gap:8px}
+
+/* ── MAPA ENTREGA ── */
+#delivery-map-wrap{
+  border-radius:var(--radius);overflow:hidden;border:1px solid var(--border);
+  box-shadow:var(--shadow);position:relative;background:var(--bg4);
+}
+#delivery-map{height:220px;width:100%;display:block}
+.map-legend{
+  position:absolute;bottom:10px;left:10px;z-index:500;
+  background:rgba(255,255,255,.92);backdrop-filter:blur(6px);
+  border-radius:10px;padding:6px 10px;font-size:11px;font-weight:700;
+  display:flex;gap:10px;align-items:center;box-shadow:0 2px 8px rgba(0,0,0,.12);
+}
+.map-legend-item{display:flex;align-items:center;gap:4px;color:var(--text)}
+.map-dist-badge{
+  position:absolute;top:10px;right:10px;z-index:500;
+  background:var(--blue);color:#fff;border-radius:20px;
+  padding:5px 12px;font-size:12px;font-weight:800;
+  box-shadow:0 2px 8px rgba(37,99,235,.35);
+}
+
+#toast{
+  position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(10px);
+  background:var(--text);border:none;color:#fff;
+  padding:12px 24px;border-radius:40px;font-size:13px;font-weight:600;
+  opacity:0;transition:all .25s;z-index:9999;white-space:nowrap;pointer-events:none;
+  box-shadow:0 8px 32px rgba(15,21,53,.25);max-width:90vw;text-align:center;
+}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* ── MODAL ── */
+.modal-bg{
+  position:fixed;inset:0;background:rgba(15,21,53,.6);backdrop-filter:blur(8px);
+  display:none;align-items:flex-end;justify-content:center;z-index:800;
+}
+.modal-bg.open{display:flex}
+.modal{
+  background:var(--bg2);border:1px solid var(--border);border-radius:20px 20px 0 0;
+  padding:24px 20px;padding-bottom:max(24px,env(safe-area-inset-bottom));
+  width:100%;max-width:480px;animation:slideUp .25s ease;
+}
+@keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+.modal-title{font-family:var(--font-head);font-size:22px;font-weight:800;margin-bottom:6px;color:var(--text)}
+.modal-sub{font-size:13px;color:var(--muted2);margin-bottom:20px;line-height:1.6}
+.modal-actions{display:flex;flex-direction:column;gap:10px;margin-top:6px}
+</style>
+</head>
+<body>
+
+<!-- LOADING -->
+<div id="screen-loading" class="screen active">
+  <div class="ld-logo">Pedix<span>Go</span></div>
+  <div class="ld-sub">Carregando...</div>
+  <div class="ld-spinner"></div>
+  <div id="debug-log" style="position:fixed;bottom:20px;left:16px;right:16px;font-size:11px;color:rgba(255,255,255,.4);text-align:left;line-height:1.8"></div>
+</div>
+
+<!-- TOAST -->
+<div id="toast"></div>
+
+<!-- MODAL CONFIRMAR ACEITE -->
+<div class="modal-bg" id="modal-accept">
+  <div class="modal">
+    <div class="modal-title">Aceitar entrega?</div>
+    <div class="modal-sub" id="modal-accept-sub">Confirme para aceitar este pedido. Ele será bloqueado para outros motoboys.</div>
+    <div class="modal-actions">
+      <button class="btn-main" onclick="confirmAccept()">✅ Confirmar aceite</button>
+      <button class="btn-ghost" onclick="closeModal('modal-accept')">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CANCELAR ENTREGA -->
+<div class="modal-bg" id="modal-cancel">
+  <div class="modal">
+    <div class="modal-title">Cancelar entrega?</div>
+    <div class="modal-sub">O pedido voltará para a fila e outro motoboy poderá aceitá-lo. Use apenas em emergências.</div>
+    <div class="modal-actions">
+      <button class="btn-step" style="background:var(--red);color:#fff" onclick="confirmCancel()">🔴 Sim, cancelar entrega</button>
+      <button class="btn-ghost" onclick="closeModal('modal-cancel')">Voltar</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CONFIRMAR COLETA NA LOJA -->
+<div class="modal-bg" id="modal-collect">
+  <div class="modal">
+    <div class="modal-title">📦 Confirmou a coleta?</div>
+    <div class="modal-sub">Confirme que você já está com o pedido em mãos e vai sair da loja agora.</div>
+    <div class="modal-actions">
+      <button class="btn-step collect" onclick="confirmCollect()">📦 Sim, coletei o pedido</button>
+      <button class="btn-ghost" onclick="closeModal('modal-collect')">Ainda não</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CONFIRMAR ENTREGA AO CLIENTE -->
+<div class="modal-bg" id="modal-deliver">
+  <div class="modal">
+    <div class="modal-title">✅ Entrega concluída?</div>
+    <div class="modal-sub">Confirme que o pedido foi entregue ao cliente e a corrida será finalizada.</div>
+    <!-- v2.2.2 FEAT (relato Falcao — "só finalizar a entrega quando ele
+    receber o pagamento", pra Débito/Crédito/Pix na entrega/Dinheiro —
+    pago no ato, não antecipado): mostrado só quando a forma de pagamento
+    exige cobrança na entrega. Pix (pago antecipado, na hora do pedido)
+    não mostra nada extra — segue direto pro botão normal. -->
+    <div id="deliver-payment-box" style="display:none;background:#fff8e6;border:1.5px solid #f0c14b;border-radius:10px;padding:12px;margin:10px 0;text-align:center">
+      <div style="font-size:13px;color:#665200;font-weight:700">💰 Cobrar do cliente na entrega:</div>
+      <div id="deliver-payment-info" style="font-size:20px;font-weight:900;color:#111;margin-top:4px"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-step deliver" id="btn-confirm-deliver" onclick="doDeliver()">✅ Sim, entreguei ao cliente</button>
+      <button class="btn-ghost" onclick="closeModal('modal-deliver')">Ainda não</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ TELA: AUTH ══════════════ -->
+<div id="screen-auth" class="screen">
+  <div class="auth-box">
+    <div class="auth-logo">Pedix<span>Go</span></div>
+    <div class="auth-tagline">App de entregas para motoboys parceiros</div>
+    <div style="font-size:11px;color:#aaa;text-align:center;margin-top:4px;font-weight:600;letter-spacing:.5px">v2.2.4</div>
+
+    <div class="auth-tabs">
+      <button class="auth-tab active" onclick="switchTab('login')">Entrar</button>
+      <button class="auth-tab" onclick="switchTab('register')">Cadastrar</button>
+      <button class="auth-tab" onclick="switchTab('frota')">🏍 Frota</button>
+    </div>
+
+    <!-- LOGIN -->
+    <div class="auth-section active" id="tab-login">
+      <div class="field">
+        <label>E-mail</label>
+        <input id="l-email" type="email" inputmode="email" placeholder="seu@email.com" autocomplete="email">
+      </div>
+      <div class="field">
+        <label>Senha</label>
+        <div class="field-pass">
+          <input id="l-pass" type="password" placeholder="••••••••" autocomplete="current-password">
+          <button class="eye-btn" onclick="toggleEye('l-pass','eye-l')" id="eye-l">👁</button>
+        </div>
+      </div>
+      <button class="btn-main" onclick="doLogin()">Entrar →</button>
+      <button class="btn-forgot" onclick="doForgotPassword()">Esqueci minha senha</button>
+      <div class="auth-msg" id="l-msg"></div>
+    </div>
+
+    <!-- CADASTRO -->
+    <div class="auth-section" id="tab-register">
+      <div class="field">
+        <label>Seu nome completo</label>
+        <input id="r-name" type="text" placeholder="João da Silva" autocomplete="name">
+      </div>
+      <div class="field">
+        <label>Telefone (WhatsApp)</label>
+        <input id="r-phone" type="tel" inputmode="numeric" placeholder="62999999999" maxlength="15">
+      </div>
+      <div class="field">
+        <label>Tipo de veículo</label>
+        <input id="r-vehicle" type="text" placeholder="Moto, Bicicleta, Carro...">
+      </div>
+      <div class="field">
+        <label>E-mail</label>
+        <input id="r-email" type="email" inputmode="email" placeholder="seu@email.com" autocomplete="email">
+      </div>
+      <div class="field">
+        <label>Senha</label>
+        <div class="field-pass">
+          <input id="r-pass" type="password" placeholder="Mínimo 6 caracteres" autocomplete="new-password">
+          <button class="eye-btn" onclick="toggleEye('r-pass','eye-r')" id="eye-r">👁</button>
+        </div>
+      </div>
+      <button class="btn-main" onclick="doRegister()">Enviar cadastro →</button>
+      <div class="auth-msg" id="r-msg"></div>
+    </div>
+
+    <!-- FROTA PRÓPRIA — v1.9.8 -->
+    <div class="auth-section" id="tab-frota">
+      <div style="text-align:center;margin-bottom:20px">
+        <div style="font-size:32px;margin-bottom:8px">🏍</div>
+        <div style="font-size:14px;font-weight:800;color:var(--fg)">Sou da frota de uma loja</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:4px">Digite o código que o lojista enviou para você</div>
+      </div>
+      <div class="field">
+        <label>Código de acesso (6 dígitos)</label>
+        <input id="f-codigo" type="text" inputmode="numeric" maxlength="6" placeholder="000000"
+          style="font-size:28px;font-weight:900;letter-spacing:8px;text-align:center"
+          oninput="this.value=this.value.replace(/\D/g,'').slice(0,6)">
+      </div>
+      <button class="btn-main" onclick="doLoginFrota()">Entrar na frota →</button>
+      <div class="auth-msg" id="f-msg"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ TELA: PENDING ══════════════ -->
+<div id="screen-pending" class="screen">
+  <div style="margin:auto;text-align:center;padding:24px">
+    <div class="pending-ico">⏳</div>
+    <div class="pending-title">Cadastro enviado!</div>
+    <div class="pending-sub">
+      Seu cadastro está sendo analisado.<br>
+      Assim que aprovado, você já pode fazer login com seu e-mail e senha.
+    </div>
+    <button class="btn-ghost" style="max-width:280px;margin:0 auto" onclick="doLogout()">← Voltar ao início</button>
+  </div>
+</div>
+
+<!-- ══════════════ TELA: REJECTED ══════════════ -->
+<div id="screen-rejected" class="screen">
+  <div style="margin:auto;text-align:center;padding:24px">
+    <div class="rejected-ico">❌</div>
+    <div class="rejected-title">Cadastro não aprovado</div>
+    <div class="rejected-sub">
+      Infelizmente seu cadastro não foi aprovado.<br>
+      Entre em contato pelo WhatsApp para mais informações.
+    </div>
+    <button class="btn-ghost" style="max-width:280px;margin:0 auto" onclick="doLogout()">← Voltar ao início</button>
+  </div>
+</div>
+
+<!-- ══════════════ TELA: DASHBOARD ══════════════ -->
+<div id="screen-dash" class="screen">
+  <div class="topbar">
+    <div class="tb-logo">Pedix<span>Go</span></div>
+    <div class="tb-right">
+      <span id="tb-name" style="font-size:13px;color:rgba(255,255,255,.7);font-weight:500"></span>
+      <button class="btn-logout" onclick="loadHistorico('hoje')" style="border-color:rgba(255,255,255,.4)">📦 Histórico</button>
+      <button class="btn-logout" onclick="doLogout()">Sair</button>
+    </div>
+  </div>
+
+  <!-- Info de sessão -->
+  <div class="session-bar">
+    <div class="session-dot"></div>
+    <span style="color:var(--muted2)">Sessão válida até <strong style="color:var(--blue)" id="session-expires">23:59</strong> de hoje</span>
+  </div>
+
+  <!-- Status toggle -->
+  <div class="status-hero">
+    <div class="status-row">
+      <div class="status-info">
+        <div class="status-label">Seu status</div>
+        <div class="status-val offline" id="status-val">OFFLINE</div>
+        <div class="status-sub" id="status-sub">Ative para receber pedidos</div>
+      </div>
+      <div class="toggle-wrap">
+        <label class="toggle">
+          <input type="checkbox" id="toggle-online" onchange="toggleOnline(this.checked)">
+          <div class="toggle-track"></div>
+        </label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Seletor de raio v1.9.7 -->
+  <div class="raio-bar" id="raio-bar">
+    <span class="raio-label">📍 Raio:</span>
+    <button class="raio-btn active" id="raio-5"  onclick="setRaio(5)">5 km</button>
+    <button class="raio-btn"        id="raio-8"  onclick="setRaio(8)">8 km</button>
+    <button class="raio-btn"        id="raio-12" onclick="setRaio(12)">12 km</button>
+  </div>
+
+  <!-- GPS -->
+  <div class="gps-bar" id="gps-bar">
+    <div class="gps-dot wait" id="gps-dot"></div>
+    <span id="gps-txt" style="color:var(--muted2);font-weight:500">Aguardando localização...</span>
+  </div>
+
+  <!-- Lista de pedidos -->
+  <div class="section-head">
+    <div class="section-title">Pedidos disponíveis</div>
+    <div class="section-count" id="del-count">0</div>
+  </div>
+  <div class="deliveries-list" id="deliveries-list">
+    <div class="empty-state">
+      <div class="empty-ico">🛵</div>
+      <div class="empty-txt">Fique online para ver<br>pedidos disponíveis próximos.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ TELA: HISTÓRICO ══════════════ -->
+<div id="screen-historico" class="screen">
+  <!-- v2.0.9 FIX: topbar + barra de período agrupados num wrapper sticky único —
+       antes só a topbar era sticky (position:sticky isolado) e a hist-period-bar
+       ficava em fluxo normal logo abaixo; ao rolar a lista, a barra de período
+       passava por baixo da topbar (mesmo z-index:100) e ficava visualmente cortada/
+       sobreposta pelo cabeçalho azul durante a rolagem, em vez de permanecer fixa
+       junto com ele. Agora o grupo inteiro (topbar+filtros) fica fixo no topo;
+       só a lista de entregas (#hist-content) rola por baixo dos dois. -->
+  <div class="hist-sticky-head">
+    <div class="topbar">
+      <button onclick="showScreen('screen-dash')" style="background:none;border:none;color:rgba(255,255,255,.8);font-size:20px;padding:4px">←</button>
+      <div class="tb-logo" style="font-size:20px">Histórico</div>
+      <div style="width:32px"></div>
+    </div>
+    <!-- Filtros de período -->
+    <div class="hist-period-bar" id="hist-period-bar" style="padding-top:16px">
+      <button class="hist-period-btn active" onclick="loadHistorico('hoje')">Hoje</button>
+      <button class="hist-period-btn" onclick="loadHistorico('semana')">Esta semana</button>
+      <button class="hist-period-btn" onclick="loadHistorico('mes')">Este mês</button>
+      <button class="hist-period-btn" onclick="loadHistorico('tudo')">Tudo</button>
+    </div>
+  </div>
+  <div id="hist-content" style="padding:0 20px 40px;display:flex;flex-direction:column;gap:14px"></div>
+</div>
+
+<!-- ══════════════ TELA: ENTREGA ATIVA ══════════════ -->
+<div id="screen-delivery" class="screen">
+  <div class="delivery-topbar">
+    <div class="delivery-title">Entrega ativa</div>
+    <div class="delivery-badge assigned" id="delivery-badge">COLETANDO</div>
+  </div>
+
+  <div class="delivery-content">
+    <!-- Steps -->
+    <div class="steps-bar" id="steps-bar">
+      <div class="step-item active" id="step-collect">
+        <div class="step-dot">1</div>
+        <div class="step-lbl">Coletar</div>
+      </div>
+      <div class="step-item" id="step-deliver">
+        <div class="step-dot">2</div>
+        <div class="step-lbl">Entregar</div>
+      </div>
+      <div class="step-item" id="step-done">
+        <div class="step-dot">✓</div>
+        <div class="step-lbl">Concluído</div>
+      </div>
+    </div>
+
+    <!-- MAPA ENTREGA ATIVA -->
+    <div class="info-card" style="padding:0;position:relative" id="delivery-map-wrap">
+      <div id="delivery-map"></div>
+      <div class="map-dist-badge" id="map-dist-badge" style="display:none">— km</div>
+      <div class="map-legend">
+        <span class="map-legend-item">🛵 Você</span>
+        <span class="map-legend-item">🏪 Loja</span>
+        <span class="map-legend-item">🏠 Cliente</span>
+      </div>
+    </div>
+
+    <!-- Info loja + destino -->
+    <div class="info-card">
+      <div class="info-card-title">Detalhes da entrega</div>
+      <div class="info-row">
+        <div class="info-ico store">🏪</div>
+        <div>
+          <div class="info-label">Retirar em</div>
+          <div class="info-val" id="del-store-name">—</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px" id="del-store-addr">—</div>
+        </div>
+      </div>
+      <div class="info-row">
+        <div class="info-ico dest">📍</div>
+        <div>
+          <div class="info-label">Entregar em</div>
+          <div class="info-val" id="del-dest-addr">—</div>
+        </div>
+      </div>
+      <div class="info-row">
+        <div class="info-ico fee">💰</div>
+        <div>
+          <div class="info-label">Sua taxa de entrega</div>
+          <div class="info-val" id="del-fee-val" style="color:var(--green);font-size:18px">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Botões de navegação -->
+    <div class="nav-card">
+      <button class="btn-nav origin" id="btn-nav-store" onclick="openMaps('origin')">
+        🗺️ Ir à loja
+      </button>
+      <button class="btn-nav dest" id="btn-nav-dest" onclick="openMaps('dest')">
+        🗺️ Ir ao cliente
+      </button>
+    </div>
+
+    <!-- Ações -->
+    <div class="action-card">
+      <button class="btn-step collect" id="btn-collected" onclick="markCollected()">
+        📦 Confirmei a coleta na loja
+      </button>
+      <button class="btn-step deliver" id="btn-delivered" onclick="openDeliverModal()" style="display:none">
+        ✅ Entrega concluída!
+      </button>
+      <button class="btn-cancel" onclick="openModal('modal-cancel')">Cancelar entrega</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ TELA: MÚLTIPLAS ENTREGAS (frota) ══════════════ -->
+<!-- v2.1.3 FEAT (pedido Falcao — motoboy de frota pode aceitar mais de uma
+     entrega ao mesmo tempo, sem limite; mostra mapa com a rota passando por
+     todos os pontos de entrega). Confirmação de cada entrega continua uma
+     de cada vez, conforme completa cada parada. -->
+<div id="screen-multi-delivery" class="screen">
+  <div class="delivery-topbar">
+    <div class="delivery-title">Minhas Entregas (<span id="multi-count">0</span>)</div>
+    <button onclick="showScreen('screen-dash');initGPS();" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:20px;padding:6px 14px;font-size:12px;font-weight:800;cursor:pointer">+ Buscar mais</button>
+  </div>
+  <div class="delivery-content">
+    <!-- MAPA COM TODOS OS PONTOS -->
+    <div class="info-card" style="padding:0;position:relative" id="multi-map-wrap">
+      <div id="multi-delivery-map" style="height:280px;border-radius:12px 12px 0 0"></div>
+      <div class="map-dist-badge" id="multi-map-dist-badge" style="display:none">— km</div>
+      <div class="map-legend">
+        <span class="map-legend-item">🛵 Você</span>
+        <span class="map-legend-item">🏪 Loja</span>
+        <span class="map-legend-item">🏠 Entregas</span>
+      </div>
+    </div>
+
+    <!-- LISTA DE ENTREGAS ATIVAS -->
+    <div id="multi-delivery-list" style="display:flex;flex-direction:column;gap:12px;margin-top:14px"></div>
+  </div>
+</div>
+
+<script>
+// [SEGURANÇA 2026-06-22] Anti-clickjacking
+if(window.self!==window.top){document.body.innerHTML='<div style="padding:2rem;font-family:sans-serif">Acesso não permitido em iframe.</div>';}
+/* ═══════════════════════════════════════════════
+   ESTADO GLOBAL
+   ═══════════════════════════════════════════════ */
+let _mbData         = null;   // dados do motoboy logado
+let _mbId           = null;   // UID do Firebase Auth
+let _online         = false;
+let _gpsLat         = null;
+let _gpsLng         = null;
+let _gpsOk          = false;
+let _polling        = null;
+let _sessionTimer   = null;
+let _activeDelivery = null;
+let _activeDeliveryUnsub = null; // v1.9.1: unsubscribe da escuta em tempo real do delivery ativo (bug #9)
+let _deliveriesUnsub    = null; // v2.0.2: unsubscribe do listener onSnapshot de pedidos disponiveis (bug 1 fix)
+let _pendingApprovalUnsub = null; // v2.0.4: unsubscribe do listener de aprovação de cadastro
+let _pendingAcceptId= null;
+let _recusados      = {};     // {deliveryId: timestamp} — pedidos recusados pelo motoboy
+let _isFrota        = false;  // v1.9.8: true se logado como frota própria (sem Firebase Auth)
+let _frotaTenantUid = null;   // v1.9.8: tenantUid do lojista desta frota
+let _frotaCodigo    = null;   // v2.0.8: código de 6 dígitos usado no login — preservado
+                               // separadamente de _mbId (que desde v2.0.7 é o UID anônimo)
+                               // para permitir que o relatório "Frota Própria" do Burger
+                               // continue cruzando por código sem depender do UID
+
+const POLL_INTERVAL    = 30000;
+/* [2026-06-21] Sanitização: escapa HTML/atributos. destAddr/storeAddr vêm de checkout público (cliente final, sem login) — risco real de XSS armazenado se não escapado. */
+function escHtml(s){return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
+// v1.9.7 FEAT: raio escolhido pelo motoboy (5/8/12km), persiste em localStorage
+let SEARCH_RADIUS_KM = parseInt(localStorage.getItem('pedixgo_raio')||'5')||5;
+const RECUSAR_TEMPO_MS = 30 * 60 * 1000; // 30 minutos oculto após recusar
+
+/* ═══════════════════════════════════════════════
+   HELPERS UI
+   ═══════════════════════════════════════════════ */
+function toast(msg, dur=3000){
+  const el=document.getElementById("toast");
+  if(!el){ console.warn("[Pedix Go] toast: elemento #toast não encontrado"); return; }
+  el.textContent=msg; el.classList.add("show");
+  clearTimeout(window._toastT);
+  window._toastT=setTimeout(()=>el.classList.remove("show"),dur);
+}
+// v2.1.8 FEAT (relato Falcao — botão voltar do Android não tinha nenhum
+// tratamento, causando reload da página e perda de contexto visual; mesmo
+// padrão seguro já usado no Burger/Petshop, construído com cuidado depois
+// de uma versão anterior no Burger ter causado perda de carrinho por
+// corrida assíncrona — NUNCA chama history.back() por conta própria, só
+// reage a popstate de verdade, e as declarações ficam ANTES de showScreen
+// pra nunca correr risco de ordem de carregamento).
+let _navStack=['screen-auth'];
+let _isPoppingNav=false;
+
+function showScreen(id){
+  const el=document.getElementById(id);
+  if(!el){ dbg("❌ showScreen: elemento '"+id+"' não encontrado!"); return; }
+  if(!_isPoppingNav && _navStack[_navStack.length-1]!==id){
+    _navStack.push(id);
+    try{ history.pushState({pedixNav:true}, ''); }catch(e){}
+  }
+  document.querySelectorAll(".screen").forEach(s=>s.classList.remove("active"));
+  el.classList.add("active");
+  dbg("✅ showScreen: "+id+" ativado");
+}
+function openModal(id){
+  const el=document.getElementById(id);
+  if(!el){ console.warn("[Pedix Go] openModal: elemento '"+id+"' não encontrado"); return; }
+  el.classList.add("open");
+  if(!_isPoppingNav){
+    _navStack.push(id);
+    try{ history.pushState({pedixNav:true}, ''); }catch(e){}
+  }
+}
+function closeModal(id){
+  const el=document.getElementById(id);
+  if(!el){ console.warn("[Pedix Go] closeModal: elemento '"+id+"' não encontrado"); return; }
+  el.classList.remove("open");
+  // Fechar pela tela (botão Cancelar/X) só tira da pilha em memória, SEM
+  // tocar no histórico do navegador — mesma lição já aprendida no Burger
+  // (v2.5.8 chamava history.back() nesse ponto e causava corrida
+  // assíncrona séria; nunca repetir isso).
+  const idx=_navStack.lastIndexOf(id);
+  if(idx!==-1) _navStack.splice(idx,1);
+}
+
+window.addEventListener('popstate', ()=>{
+  if(_navStack.length<=1) return;
+  const popped=_navStack.pop();
+  const poppedEl=document.getElementById(popped);
+  _isPoppingNav=true;
+  if(poppedEl && poppedEl.classList.contains('modal-bg')){
+    poppedEl.classList.remove('open');
+  }
+  // Reaplica a tela/modal que ficou no topo da pilha
+  for(let i=_navStack.length-1;i>=0;i--){
+    const id=_navStack[i];
+    const el=document.getElementById(id);
+    if(!el) continue;
+    if(el.classList.contains('screen')){
+      showScreen(id);
+      break;
+    }
+  }
+  _isPoppingNav=false;
+});
+
+function toggleEye(inputId, btnId){
+  const inp=document.getElementById(inputId);
+  const btn=document.getElementById(btnId);
+  if(inp.type==="password"){inp.type="text"; btn.textContent="🙈";}
+  else{inp.type="password"; btn.textContent="👁";}
+}
+
+/* ═══════════════════════════════════════════════
+   BOOT — Firebase Auth monitora sessão
+   ═══════════════════════════════════════════════ */
+function dbg(msg){
+  const el=document.getElementById("debug-log");
+  if(el) el.innerHTML += msg+"<br>";
+}
+
+function bootApp(){
+  dbg("✅ Firebase OK — verificando sessão...");
+  const{auth, onAuthStateChanged}=window._GO;
+  onAuthStateChanged(auth, async user=>{
+    // v2.1.2 FIX CRÍTICO (relato+print Falcao — toda vez que abria o app,
+    // aparecia "Cadastro enviado!" sozinho, sem preencher nada, e criava
+    // entrada "Pendente" em branco no Gestor): o boot faz login anônimo
+    // automático (signInAnonymously, linha ~87 — necessário pra outras
+    // coisas, como ler frota/{codigo} antes do motoboy logar de verdade).
+    // O onAuthStateChanged aqui tratava QUALQUER sessão, incluindo essa
+    // anônima automática, como "usuário logado de verdade" e chamava
+    // loadMbData(uid) — que não encontra motoboys/{uid} pra esse UID
+    // anônimo (nunca existiu cadastro nenhum) e mostra a tela de "Cadastro
+    // enviado" por engano. Corrigido ignorando sessão anônima aqui — só
+    // trata como login de verdade quando NÃO é anônima (motoboy avulso
+    // logado com email/senha).
+    if(user && !user.isAnonymous){
+      dbg("✅ Usuário logado: "+user.uid.substring(0,8));
+      await loadMbData(user.uid);
+    } else {
+      dbg("➡ Sem sessão de verdade — verificando sessão de frota...");
+      // v1.9.8: tenta restaurar sessão de frota própria (login por código)
+      const restorou = await _tryRestoreFrotaSession();
+      if(!restorou){
+        dbg("➡ Sem sessão — indo para login");
+        showScreen("screen-auth");
+      }
+    }
+  });
+}
+
+if(window._goReady){
+  dbg("✅ goReady já estava true");
+  bootApp();
+} else {
+  dbg("⏳ Aguardando goReady...");
+  window.addEventListener("goReady", ()=>{
+    dbg("✅ goReady disparado");
+    bootApp();
+  });
+}
+
+window.addEventListener("goError", ()=>{
+  dbg("❌ goError: "+(window._goError||"desconhecido"));
+  showScreen("screen-auth");
+  toast("⚠ Erro ao conectar. Verifique sua conexão.");
+});
+
+// Timeout segurança
+setTimeout(()=>{
+  const _sl=document.getElementById("screen-loading");
+  if(_sl && _sl.classList.contains("active")){
+    showScreen("screen-auth");
+    toast("⚠ Tempo esgotado. Verifique sua conexão.");
+  }
+},8000);
+
+/* ═══════════════════════════════════════════════
+   CARREGAR DADOS DO MOTOBOY
+   ═══════════════════════════════════════════════ */
+async function loadMbData(uid){
+  try{
+    const{db, doc, getDoc, onSnapshot}=window._GO;
+    const snap=await getDoc(doc(db,"motoboys",uid));
+    if(!snap.exists()){
+      // Documento não existe ainda (cadastro em andamento)
+      showScreen("screen-pending");
+      _watchPendingApproval(uid);
+      return;
+    }
+    const data={id:uid,...snap.data()};
+    // v2.2.0 FIX CRÍTICO (relato+confirmação Falcao — valor do frete
+    // escondido pra entregador que não deveria, mesmo com o toggle não
+    // se aplicando a esse caso): esse caminho é o login NORMAL (email/
+    // senha), que por design nunca deveria ter esconderValor aplicado —
+    // só frota (login por código) tem essa regra. Só que doLoginFrota()
+    // grava esconderValor DENTRO desse mesmo documento motoboys/{uid}
+    // (merge:true, v2.1.0) — se esse entregador já foi membro de frota
+    // em algum momento antes, esse campo antigo fica salvo pra sempre no
+    // documento, e o login normal herdava esse resquício sem querer,
+    // mesmo o comentário original do código já dizendo que login por
+    // email/senha "não passa por esse campo". Zerado explicitamente aqui.
+    data.esconderValor = false;
+    if(data.status==="pending"){
+      showScreen("screen-pending");
+      _watchPendingApproval(uid);
+      return;
+    }
+    if(data.status==="rejected"){
+      showScreen("screen-rejected"); return;
+    }
+    if(data.status==="blocked"){
+      toast("Sua conta está bloqueada. Entre em contato com o suporte.");
+      await window._GO.signOut(window._GO.auth);
+      showScreen("screen-auth"); return;
+    }
+    // Aprovado — entra no app
+    await enterApp(data);
+  }catch(e){
+    toast("⚠ Erro ao carregar dados: "+e.message);
+    showScreen("screen-auth");
+  }
+}
+
+/* Bug 3 FIX (v2.0.4): escuta em tempo real o documento do motoboy enquanto está
+   na screen-pending — detecta aprovação pelo SuperAdmin sem precisar reabrir o app. */
+function _watchPendingApproval(uid){
+  if(_pendingApprovalUnsub){ _pendingApprovalUnsub(); _pendingApprovalUnsub=null; }
+  if(!window._GO) return;
+  const{db, doc, onSnapshot}=window._GO;
+  _pendingApprovalUnsub=onSnapshot(doc(db,"motoboys",uid), async snap=>{
+    if(!snap.exists()) return;
+    const data={id:uid,...snap.data()};
+    // v2.2.0 FIX (mesmo achado de loadMbData): esse caminho também não é
+    // frota, mesma correção aplicada.
+    data.esconderValor = false;
+    if(data.status==="pending") return; // ainda aguardando, ignora
+    // Status mudou — encerra listener e processa
+    _pendingApprovalUnsub(); _pendingApprovalUnsub=null;
+    if(data.status==="active"){
+      toast("✅ Cadastro aprovado! Bem-vindo ao Pedix Go!");
+      await enterApp(data);
+    } else if(data.status==="rejected"){
+      showScreen("screen-rejected");
+    } else if(data.status==="blocked"){
+      toast("Sua conta está bloqueada. Entre em contato com o suporte.");
+      await window._GO.signOut(window._GO.auth);
+      showScreen("screen-auth");
+    }
+  }, e=>{ console.warn("[Pedix Go] _watchPendingApproval error:",e.message); });
+}
+
+/* ═══════════════════════════════════════════════
+   AUTH — ABAS
+   ═══════════════════════════════════════════════ */
+function switchTab(tab){
+  const tabs = ['login','register','frota'];
+  document.querySelectorAll(".auth-tab").forEach((t,i)=>t.classList.toggle("active",tabs[i]===tab));
+  tabs.forEach(t=>{
+    const el=document.getElementById("tab-"+t);
+    if(el) el.classList.toggle("active",t===tab);
+  });
+}
+
+/* ── CADASTRO ── */
+async function doRegister(){
+  if(!window._GO){toast("⚠ Firebase não conectado");return;}
+  const name    = document.getElementById("r-name").value.trim();
+  const phone   = document.getElementById("r-phone").value.trim().replace(/\D/g,"");
+  const vehicle = document.getElementById("r-vehicle").value.trim();
+  const email   = document.getElementById("r-email").value.trim();
+  const pass    = document.getElementById("r-pass").value;
+  const msgEl   = document.getElementById("r-msg");
+  msgEl.textContent=""; msgEl.className="auth-msg";
+
+  if(!name){msgEl.textContent="Informe seu nome.";msgEl.className="auth-msg err";return;}
+  if(!phone||phone.length<8){msgEl.textContent="Telefone inválido.";msgEl.className="auth-msg err";return;}
+  if(!vehicle){msgEl.textContent="Informe o tipo de veículo.";msgEl.className="auth-msg err";return;}
+  if(!email||!email.includes("@")){msgEl.textContent="E-mail inválido.";msgEl.className="auth-msg err";return;}
+  if(!pass||pass.length<6){msgEl.textContent="Senha deve ter mínimo 6 caracteres.";msgEl.className="auth-msg err";return;}
+
+  const btn=document.querySelector("#tab-register .btn-main");
+  btn.disabled=true; btn.textContent="Enviando...";
+  try{
+    const{auth, db, doc, setDoc, createUserWithEmailAndPassword}=window._GO;
+    // Cria usuário no Firebase Auth
+    const cred=await createUserWithEmailAndPassword(auth, email, pass);
+    const uid=cred.user.uid;
+    // Grava documento em motoboys com status pending
+    await setDoc(doc(db,"motoboys",uid),{
+      nome: name, telefone: phone, veiculo: vehicle, email: email,
+      status: "pending", online: false, activeOrderId: null,
+      uid: uid, createdAt: Date.now(), lastActiveAt: Date.now()
+    });
+    showScreen("screen-pending");
+    toast("Cadastro enviado! Aguarde aprovação.");
+  }catch(e){
+    let msg="Erro ao cadastrar.";
+    if(e.code==="auth/email-already-in-use") msg="E-mail já cadastrado. Faça login.";
+    if(e.code==="auth/invalid-email") msg="E-mail inválido.";
+    if(e.code==="auth/weak-password") msg="Senha muito fraca. Use mínimo 6 caracteres.";
+    msgEl.textContent=msg; msgEl.className="auth-msg err";
+    btn.disabled=false; btn.textContent="Enviar cadastro →";
+  }
+}
+
+/* ── LOGIN ── */
+async function doLogin(){
+  if(!window._GO){toast("⚠ Firebase não conectado");return;}
+  const email = document.getElementById("l-email").value.trim();
+  const pass  = document.getElementById("l-pass").value;
+  const msgEl = document.getElementById("l-msg");
+  msgEl.textContent=""; msgEl.className="auth-msg";
+
+  if(!email||!email.includes("@")){msgEl.textContent="E-mail inválido.";msgEl.className="auth-msg err";return;}
+  if(!pass){msgEl.textContent="Informe sua senha.";msgEl.className="auth-msg err";return;}
+
+  const btn=document.querySelector("#tab-login .btn-main");
+  btn.disabled=true; btn.textContent="Verificando...";
+  try{
+    await window._GO.signInWithEmailAndPassword(window._GO.auth, email, pass);
+    // v2.2.0 FIX CRÍTICO (relato+print Falcao — botão preso em
+    // "Verificando..." pra sempre, sem conseguir fazer login de novo):
+    // mesmo bug já corrigido em doLoginFrota() na v2.0.7, mas essa função
+    // irmã nunca recebeu a mesma correção — só o caminho de ERRO
+    // resetava o botão, nunca o de SUCESSO. onAuthStateChanged troca de
+    // tela de forma assíncrona/separada, então o reset aqui garante que o
+    // botão nunca fique travado, mesmo que a troca de tela demore ou o
+    // usuário volte a essa tela por qualquer motivo depois.
+    btn.disabled=false; btn.textContent="Entrar →";
+    // onAuthStateChanged vai detectar e chamar loadMbData automaticamente
+  }catch(e){
+    let msg="Erro ao entrar.";
+    if(e.code==="auth/user-not-found"||e.code==="auth/wrong-password"||e.code==="auth/invalid-credential") msg="E-mail ou senha incorretos.";
+    if(e.code==="auth/too-many-requests") msg="Muitas tentativas. Tente novamente mais tarde.";
+    if(e.code==="auth/user-disabled") msg="Conta desativada. Entre em contato com o suporte.";
+    msgEl.textContent=msg; msgEl.className="auth-msg err";
+    btn.disabled=false; btn.textContent="Entrar →";
+  }
+}
+
+/* ── LOGIN FROTA PRÓPRIA — v1.9.8 ── */
+async function doLoginFrota(){
+  if(!window._GO){ toast("⚠ Firebase não conectado"); return; }
+  const codigo = (document.getElementById("f-codigo").value||"").trim();
+  const msgEl  = document.getElementById("f-msg");
+  msgEl.textContent=""; msgEl.className="auth-msg";
+
+  if(!codigo || codigo.length !== 6 || !/^\d{6}$/.test(codigo)){
+    msgEl.textContent="Código inválido — deve ter 6 dígitos.";
+    msgEl.className="auth-msg err"; return;
+  }
+
+  const btn = document.querySelector("#tab-frota .btn-main");
+  btn.disabled=true; btn.textContent="Verificando...";
+
+  try{
+    const{db, doc, getDoc, auth, signInAnonymously} = window._GO;
+
+    // v2.0.0 FIX: em vez de confiar que a sessão anônima criada no boot
+    // ainda está válida (auth.currentUser pode "sumir" entre o boot e o
+    // clique nesse ambiente — causa raiz não 100% isolada, mas contornada
+    // aqui), garante autenticação ATIVAMENTE agora, no momento do clique,
+    // imediatamente antes da leitura. Isso elimina qualquer janela de
+    // tempo entre autenticar e usar a sessão.
+    if(!auth.currentUser){
+      await signInAnonymously(auth);
+    }
+
+    const snap = await getDoc(doc(db,"frota",codigo));
+
+    if(!snap.exists()){
+      msgEl.textContent="Código não encontrado. Verifique com o lojista.";
+      msgEl.className="auth-msg err";
+      btn.disabled=false; btn.textContent="Entrar na frota →"; return;
+    }
+
+    const membro = snap.data();
+
+    if(membro.ativo === false){
+      msgEl.textContent="Seu acesso está bloqueado. Entre em contato com o lojista.";
+      msgEl.className="auth-msg err";
+      btn.disabled=false; btn.textContent="Entrar na frota →"; return;
+    }
+
+    // Salva sessão de frota no localStorage
+    localStorage.setItem('pedixgo_frota_codigo', codigo);
+    localStorage.setItem('pedixgo_frota_membro', JSON.stringify(membro));
+
+    // Entra no app como membro da frota
+    // Adapta o objeto para o formato esperado por enterApp
+    // v2.0.7 FIX: _mbId SEMPRE foi pensado como "UID do Firebase Auth" (ver
+    // comentário na declaração de _mbId) — é o que motoboys/{_mbId},
+    // historico (motoboyId==_mbId) e as Rules (motoboyId==request.auth.uid)
+    // assumem em todo o resto do app. Usar o código de 6 dígitos como id (como
+    // era antes) quebra essa invariante: nunca bate com request.auth.uid (que
+    // é o UID anônimo do signInAnonymously), causando "Missing or insufficient
+    // permissions" ao aceitar pedido (tx.update grava motoboyId:_mbId=código)
+    // e cria documentos soltos/errados em motoboys/{código} nas demais
+    // gravações (toggle online, recusados, etc). Correção: usa
+    // auth.currentUser.uid como id operacional — o código continua sendo
+    // só a chave de busca em frota/{codigo}, nunca a identidade depois disso.
+    const mbData = {
+      id:        auth.currentUser.uid,
+      nome:      membro.nome,
+      telefone:  membro.telefone,
+      veiculo:   membro.veiculo,
+      tenantUid: membro.tenantUid,
+      storeName: membro.storeName,
+      status:    "active",
+      tipo:      "frota",          // marca como frota própria
+      online:    false,
+      recusados: {},
+      // v2.1.5 FEAT (pedido Falcao — entregador de frota fixo na loja, recebe
+      // diária, não precisa ver valor por entrega; lojista decide, por padrão
+      // da loja ou individual por entregador, já resolvido no cadastro):
+      esconderValor: membro.esconderValor===true
+    };
+
+    // v2.1.7 FIX CRÍTICO (relato Falcao — botão voltar do Android/logout+login
+    // fazia a entrega ativa "sumir" pro entregador, mesmo continuando
+    // corretamente atribuída no Kanban do lojista): mbData era montado só a
+    // partir de frota/{codigo} (dados fixos do cadastro), nunca lia
+    // motoboys/{uid} pra recuperar activeOrderId/activeOrderIds — então
+    // TODO login (primeiro ou repetido) esquecia qualquer entrega em
+    // andamento, mesmo ela continuando 100% correta no Firestore (por isso
+    // o Kanban do lojista nunca mentiu, o dado nunca se perdeu de verdade —
+    // só não era recarregado de volta na tela do entregador).
+    try{
+      const mbSnap = await getDoc(doc(db,"motoboys",auth.currentUser.uid));
+      if(mbSnap.exists()){
+        const mbAtual = mbSnap.data();
+        if(mbAtual.activeOrderId) mbData.activeOrderId = mbAtual.activeOrderId;
+        if(mbAtual.activeOrderIds && mbAtual.activeOrderIds.length) mbData.activeOrderIds = mbAtual.activeOrderIds;
+      }
+    }catch(e){ console.warn("[Pedix Go] falha ao recuperar entrega ativa no login:", e.message); }
+
+    _isFrota    = true;
+    _frotaTenantUid = membro.tenantUid;
+    _frotaCodigo = codigo; // v2.0.8: preserva o código pro relatório do Burger
+
+    // v2.1.0 FIX (relato Falcao — entrega de frota aparecia no Burger com UID
+    // cru como nome, sem chance de identificar o entregador): até aqui o
+    // vínculo uid↔frotaCodigo/nome só existia em memória (_frotaCodigo/mbData)
+    // e só era copiado pro Firestore no FIM da entrega (historico.frotaCodigo,
+    // v2.0.8) — se esse write falhasse por qualquer motivo, o registro ficava
+    // órfão pra sempre (nada em motoboys/{uid} pra recuperar). Agora grava o
+    // vínculo direto em motoboys/{uid} já no login, mesmo padrão/regra de
+    // escrita que o toggle online já usa (linha ~1360) — merge:true preserva
+    // online/lastActiveAt/activeOrderId já existentes no documento.
+    try{
+      const{setDoc:_setDocFrota}=window._GO;
+      await _setDocFrota(doc(db,"motoboys",auth.currentUser.uid),{
+        nome: membro.nome, frotaCodigo: codigo, tenantUid: membro.tenantUid, tipo:"frota", esconderValor: membro.esconderValor===true
+      },{merge:true});
+    }catch(e){ console.warn("[Pedix Go] gravar vínculo frota em motoboys/{uid} falhou:", e.message); }
+
+    // v2.0.7 FIX: botão ficava preso em "Verificando..." pra sempre no
+    // caminho de sucesso (só os caminhos de erro resetavam) — invisível
+    // atrás da troca de tela, mas reaparecia travado ao deslogar e voltar
+    // pra aba Frota. Mesmo padrão de bug já corrigido em outros botões.
+    btn.disabled=false; btn.textContent="Entrar na frota →";
+
+    await enterApp(mbData);
+    toast(`🏍 Bem-vindo, ${membro.nome}!`);
+
+  }catch(e){
+    msgEl.textContent="Erro ao verificar código: "+e.message;
+    msgEl.className="auth-msg err";
+    btn.disabled=false; btn.textContent="Entrar na frota →";
+  }
+}
+
+/* ── RESTAURAR SESSÃO DE FROTA no boot ── */
+async function _tryRestoreFrotaSession(){
+  const codigo = localStorage.getItem('pedixgo_frota_codigo');
+  if(!codigo) return false;
+  try{
+    // v2.0.0 FIX: mesma estratégia de doLoginFrota() — garante auth
+    // ativamente em vez de confiar na sessão criada no boot.
+    const{db, doc, getDoc, auth, signInAnonymously} = window._GO;
+    if(!auth.currentUser){
+      await signInAnonymously(auth);
+    }
+
+    const snap = await getDoc(doc(db,"frota",codigo));
+    if(!snap.exists() || snap.data().ativo === false){
+      localStorage.removeItem('pedixgo_frota_codigo');
+      localStorage.removeItem('pedixgo_frota_membro');
+      return false;
+    }
+    const membro = snap.data();
+    // v2.0.7 FIX: mesmo motivo do fix em doLoginFrota() — id precisa ser o
+    // UID do Firebase Auth (auth.currentUser.uid), nunca o código, ou todo
+    // write em deliveries/motoboys/historico bate de frente com as Rules
+    // (motoboyId==request.auth.uid) e falha com permission-denied.
+    const mbData = {
+      id: auth.currentUser.uid, nome: membro.nome, telefone: membro.telefone,
+      veiculo: membro.veiculo, tenantUid: membro.tenantUid,
+      storeName: membro.storeName, status:"active",
+      tipo:"frota", online:false, recusados:{},
+      esconderValor: membro.esconderValor===true
+    };
+    // v2.1.7 FIX CRÍTICO: mesmo motivo/padrão do fix em doLoginFrota() —
+    // recupera entrega(s) ativa(s) de verdade em motoboys/{uid} antes de
+    // entrar no app, senão a restauração de sessão (que é exatamente o que
+    // acontece quando o botão voltar do Android força um reload) esquece
+    // qualquer entrega em andamento.
+    try{
+      const mbSnap = await getDoc(doc(db,"motoboys",auth.currentUser.uid));
+      if(mbSnap.exists()){
+        const mbAtual = mbSnap.data();
+        if(mbAtual.activeOrderId) mbData.activeOrderId = mbAtual.activeOrderId;
+        if(mbAtual.activeOrderIds && mbAtual.activeOrderIds.length) mbData.activeOrderIds = mbAtual.activeOrderIds;
+      }
+    }catch(e){ console.warn("[Pedix Go] falha ao recuperar entrega ativa na restauração:", e.message); }
+    _isFrota = true;
+    _frotaTenantUid = membro.tenantUid;
+    _frotaCodigo = codigo; // v2.0.8: preserva código pro relatório do Burger
+
+    // v2.1.0 FIX: mesmo motivo/padrão do doLoginFrota() — garante o vínculo
+    // uid↔frotaCodigo/nome em motoboys/{uid} também no caminho de restauração
+    // de sessão (app reaberto), não só no primeiro login.
+    try{
+      const{setDoc:_setDocFrota}=window._GO;
+      await _setDocFrota(doc(db,"motoboys",auth.currentUser.uid),{
+        nome: membro.nome, frotaCodigo: codigo, tenantUid: membro.tenantUid, tipo:"frota", esconderValor: membro.esconderValor===true
+      },{merge:true});
+    }catch(e){ console.warn("[Pedix Go] gravar vínculo frota em motoboys/{uid} falhou (restore):", e.message); }
+    await enterApp(mbData);
+    return true;
+  }catch(e){ return false; }
+}
+async function doForgotPassword(){
+  const email=document.getElementById("l-email").value.trim();
+  const msgEl=document.getElementById("l-msg");
+  msgEl.textContent=""; msgEl.className="auth-msg";
+  if(!email||!email.includes("@")){
+    msgEl.textContent="Digite seu e-mail acima para redefinir a senha.";
+    msgEl.className="auth-msg err"; return;
+  }
+  try{
+    await window._GO.sendPasswordResetEmail(window._GO.auth, email);
+    msgEl.textContent="Link enviado! Verifique seu e-mail.";
+    msgEl.className="auth-msg ok";
+  }catch(e){
+    msgEl.textContent="Erro ao enviar. Verifique o e-mail informado.";
+    msgEl.className="auth-msg err";
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   ENTRAR NO APP
+   ═══════════════════════════════════════════════ */
+async function enterApp(mbData){
+  _mbData = mbData;
+  _mbId   = mbData.id;
+  document.getElementById("tb-name").textContent = mbData.nome||"";
+  // v1.9.1 FIX (bug #3): _recusados agora é persistido em Firestore
+  _recusados = mbData.recusados || {};
+  // v1.9.7: restaura raio salvo pelo motoboy
+  _initRaioUI();
+  // Inicia controle de sessão 23:59
+  initSessionTimer();
+  // v2.1.3 FEAT: motoboy de FROTA pode ter VÁRIAS entregas ativas ao mesmo
+  // tempo (activeOrderIds) — avulso continua com o fluxo antigo de uma só
+  // (activeOrderId), sem nenhuma mudança de comportamento pra eles.
+  // v2.2.1 FIX CRÍTICO GRAVE (relato Falcao — frota "não aceita duas
+  // entregas, uma some" + "se deslogar e logar de novo a primeira
+  // reaparece"): achado real — essa lógica decidia qual tela abrir olhando
+  // primeiro se activeOrderIds (plural, frota) tinha itens, MAS o "else
+  // if" seguinte só checava activeOrderId (singular, avulso) sem checar de
+  // novo o tipo do entregador. Se por qualquer motivo o documento
+  // motoboys/{uid} de um entregador de FROTA tivesse um valor antigo/
+  // perdido no campo singular (ex: já foi avulso antes, ou sobra de teste),
+  // ele caía no fluxo de ENTREGA ÚNICA por engano — perdendo de vista o
+  // array activeOrderIds inteiro (com a 1ª entrega aceita) por aquela
+  // sessão. Ela nunca sumia de verdade do Firestore (por isso "reaparecia"
+  // ao relogar, quando esse mesmo bug podia ou não repetir dependendo da
+  // sorte da leitura) — só a tela certa parava de carregar. Reestruturado
+  // pra ser 100% guiado pelo tipo do entregador: frota NUNCA cai no fluxo
+  // de entrega única, não importa o que tiver no campo singular.
+  if(mbData.tipo==='frota'){
+    if(mbData.activeOrderIds && mbData.activeOrderIds.length){
+      await loadActiveDeliveries();
+    } else {
+      showScreen("screen-dash");
+      initGPS();
+    }
+  } else if(mbData.activeOrderId){
+    await loadActiveDelivery(mbData.activeOrderId);
+  } else {
+    showScreen("screen-dash");
+    initGPS();
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   LOGOUT
+   ═══════════════════════════════════════════════ */
+async function doLogout(){
+  stopPolling();
+  clearSessionTimer();
+  _mbData=null; _mbId=null; _online=false; _activeDelivery=null;
+  // v1.9.8: limpa sessão de frota própria se existir
+  if(_isFrota){
+    localStorage.removeItem('pedixgo_frota_codigo');
+    localStorage.removeItem('pedixgo_frota_membro');
+    _isFrota=false; _frotaTenantUid=null;
+  } else {
+    try{ await window._GO.signOut(window._GO.auth); }catch(_){}
+  }
+  showScreen("screen-auth");
+  document.getElementById("l-pass").value="";
+  document.getElementById("l-msg").textContent="";
+  // v2.0.7 FIX: rede de segurança — garante que o botão da aba Frota nunca
+  // volte travado em "Verificando..." pra tela de login, independente de
+  // qual caminho deixou esse estado sujo.
+  const fbtn=document.querySelector("#tab-frota .btn-main");
+  if(fbtn){ fbtn.disabled=false; fbtn.textContent="Entrar na frota →"; }
+  toast("Sessão encerrada.");
+}
+
+/* ═══════════════════════════════════════════════
+   SESSÃO — expira às 23:59
+   ═══════════════════════════════════════════════ */
+function initSessionTimer(){
+  clearSessionTimer();
+  const now   = new Date();
+  const expiry= new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 0, 0);
+  const msLeft= expiry - now;
+  if(msLeft <= 0){ scheduleLogout(); return; }
+  _sessionTimer = setTimeout(scheduleLogout, msLeft);
+}
+
+function clearSessionTimer(){
+  if(_sessionTimer){ clearTimeout(_sessionTimer); _sessionTimer=null; }
+}
+
+async function scheduleLogout(){
+  // Se tem entrega ativa, aguarda finalizar
+  if(_activeDelivery){
+    toast("⚠ Sessão expira após esta entrega (23:59).", 5000);
+    window._pendingSessionLogout = true;
+  } else {
+    toast("Sessão encerrada às 23:59. Até amanhã! 🌙", 4000);
+    setTimeout(doLogout, 1500);
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   GPS
+   ═══════════════════════════════════════════════ */
+function initGPS(){
+  const dot=document.getElementById("gps-dot");
+  const txt=document.getElementById("gps-txt");
+  if(!navigator.geolocation){
+    dot.className="gps-dot err";
+    txt.textContent="GPS não disponível neste dispositivo.";
+    txt.style.color="var(--red)"; return;
+  }
+  navigator.geolocation.watchPosition(
+    pos=>{
+      const _gpsWasOk=_gpsOk;
+      _gpsLat=pos.coords.latitude;
+      _gpsLng=pos.coords.longitude;
+      _gpsOk=true;
+      dot.className="gps-dot ok";
+      txt.textContent=`GPS ativo — ${_gpsLat.toFixed(4)}, ${_gpsLng.toFixed(4)}`;
+      txt.style.color="var(--muted2)";
+      // v2.1.1 FIX CRÍTICO (relato Falcao — motoboy que loga/fica online depois
+      // do pedido já estar "Pronto" não recebe o pedido): startPolling() já
+      // abre o onSnapshot assim que fica online, mas o GPS pode levar alguns
+      // segundos pra travar. Se o PRIMEIRO pacote do onSnapshot chegasse antes
+      // do GPS ficar pronto, _processDeliveriesSnap descartava tudo
+      // (if(!_gpsOk) return) — e como nada reprocessava depois que o GPS
+      // travava, aquele pedido que já existia ficava invisível pra sempre, só
+      // reaparecendo se alguma OUTRA mudança no Firestore disparasse um novo
+      // snapshot por acaso. Agora, assim que o GPS trava pela 1ª vez (ou volta
+      // a funcionar depois de ter falhado) com o motoboy online, força uma
+      // busca imediata dos pedidos já existentes.
+      // v2.1.1 FIX CRÍTICO (relato Falcao — motoboy que loga/fica online depois
+      // do pedido já estar "Pronto" não recebe o pedido): toggleOnline() chama
+      // startPolling(), mas essa função exige _gpsOk==true pra sequer criar o
+      // listener onSnapshot (if(!_online||!_gpsOk||!window._GO) return) — se o
+      // motoboy tocar "Ficar Online" antes do GPS travar (comum, GPS pode levar
+      // alguns segundos), o listener nunca chegava a ser criado, e nada o
+      // recriava depois que o GPS finalmente ficava pronto. O pedido que já
+      // existia ficava invisível pra sempre. Agora, assim que o GPS trava pela
+      // 1ª vez (ou volta a funcionar depois de ter falhado) com o motoboy
+      // online, garante que o listener esteja de fato criado.
+      if(!_gpsWasOk && _online && !_deliveriesUnsub) startPolling();
+    },
+    ()=>{
+      _gpsOk=false;
+      dot.className="gps-dot err";
+      txt.textContent="GPS negado. Ative a localização para receber pedidos.";
+      txt.style.color="var(--red)";
+    },
+    {enableHighAccuracy:true,timeout:10000,maximumAge:30000}
+  );
+}
+
+function distKm(lat1,lng1,lat2,lng2){
+  const R=6371, dLat=(lat2-lat1)*Math.PI/180, dLng=(lng2-lng1)*Math.PI/180;
+  const a=Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+
+/* ═══════════════════════════════════════════════
+   RAIO DE BUSCA — v1.9.7
+   ═══════════════════════════════════════════════ */
+function setRaio(km){
+  SEARCH_RADIUS_KM = km;
+  localStorage.setItem('pedixgo_raio', String(km));
+  // Atualiza botões
+  [5,8,12].forEach(r=>{
+    const btn = document.getElementById('raio-'+r);
+    if(btn) btn.classList.toggle('active', r===km);
+  });
+  // Atualiza subtítulo do status se estiver online
+  const sub = document.getElementById('status-sub');
+  if(sub && _online) sub.textContent = `Buscando pedidos em até ${km}km`;
+  // Rebusca imediatamente com novo raio
+  if(_online && _gpsOk) fetchDeliveries();
+  toast(`📍 Raio atualizado: ${km}km`);
+}
+
+function _initRaioUI(){
+  const saved = parseInt(localStorage.getItem('pedixgo_raio')||'5')||5;
+  SEARCH_RADIUS_KM = saved;
+  [5,8,12].forEach(r=>{
+    const btn = document.getElementById('raio-'+r);
+    if(btn) btn.classList.toggle('active', r===saved);
+  });
+}
+
+/* ═══════════════════════════════════════════════
+   ONLINE / OFFLINE
+   ═══════════════════════════════════════════════ */
+async function toggleOnline(checked){
+  if(!_mbId||!window._GO){toast("⚠ Não conectado");return;}
+  if(checked && !_gpsOk){
+    toast("⚠ Ative o GPS para ficar online.");
+    document.getElementById("toggle-online").checked=false;
+    return;
+  }
+  _online=checked;
+  try{
+    const{db,doc,setDoc}=window._GO;
+    await setDoc(doc(db,"motoboys",_mbId),{online:checked,lastActiveAt:Date.now()},{merge:true});
+  }catch(e){console.warn("toggle online:",e.message);}
+  updateStatusUI();
+  if(checked){
+    startPolling();
+    toast("🟢 Você está online! Buscando pedidos...");
+  } else {
+    stopPolling(); // ja chama renderDeliveries([]) internamente
+    toast("⭕ Você está offline.");
+  }
+}
+
+function updateStatusUI(){
+  const val=document.getElementById("status-val");
+  const sub=document.getElementById("status-sub");
+  if(_online){
+    val.textContent="ONLINE"; val.className="status-val online";
+    sub.textContent=`Buscando pedidos em até ${SEARCH_RADIUS_KM}km`;
+  } else {
+    val.textContent="OFFLINE"; val.className="status-val offline";
+    sub.textContent="Ative para receber pedidos";
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   ESCUTA EM TEMPO REAL DE PEDIDOS — v2.0.2
+   Bug 1 FIX: substituiu polling setInterval por onSnapshot do Firestore.
+   Pedidos aparecem/somem instantaneamente quando o status muda no servidor,
+   sem esperar o ciclo de 30s. stopPolling/startPolling mantidos como API
+   publica para compatibilidade com o restante do codigo (param. online/offline,
+   bug 4 fix, etc) — internamente gerenciam o listener onSnapshot.
+   ═══════════════════════════════════════════════ */
+
+function startPolling(){
+  stopPolling();
+  if(!_online||!_gpsOk||!window._GO) return;
+  const{db,collection,query,where,onSnapshot}=window._GO;
+  const q=query(collection(db,"deliveries"),where("status","==","waiting"));
+  _deliveriesUnsub=onSnapshot(q, snap=>{
+    _processDeliveriesSnap(snap);
+  }, e=>{ console.warn("deliveries onSnapshot erro:",e.message); });
+}
+
+function stopPolling(){
+  if(_deliveriesUnsub){ _deliveriesUnsub(); _deliveriesUnsub=null; }
+  renderDeliveries([]); // limpa lista ao parar
+}
+
+// Bug 2 FIX (v2.0.2): distancia via OSRM (rota real) em vez de Haversine
+// (linha reta). Busca assincrona — cards renderizam primeiro com distancia
+// em linha reta como placeholder e atualizam quando OSRM responder.
+async function _getOsrmDistKm(lat1,lng1,lat2,lng2){
+  try{
+    const url=`https://router.project-osrm.org/route/v1/driving/${lng1},${lat1};${lng2},${lat2}?overview=false`;
+    const r=await fetch(url,{signal:AbortSignal.timeout(4000)});
+    if(!r.ok) throw new Error("status "+r.status);
+    const data=await r.json();
+    if(data.routes&&data.routes[0]) return data.routes[0].distance/1000;
+  }catch(_){}
+  return null; // fallback: usa Haversine
+}
+
+function _processDeliveriesSnap(snap){
+  if(!_online||!_gpsOk) return;
+  const now=Date.now();
+  // Limpar recusados expirados
+  let mudou=false;
+  Object.keys(_recusados).forEach(id=>{ if(now-_recusados[id]>RECUSAR_TEMPO_MS){ delete _recusados[id]; mudou=true; } });
+  if(mudou) _saveRecusados();
+
+  const nearby=[];
+  snap.forEach(d=>{
+    const del={id:d.id,...d.data()};
+    if(_recusados[del.id]) return;
+    if(del.expiresAt && del.expiresAt < now) return;
+    if(del.readyAt   && del.readyAt   > now) return;
+    if(_isFrota){
+      if(del.tenantUid !== _frotaTenantUid) return;
+    } else {
+      if(del.frotaOnly === true) return;
+    }
+    if(del.origemLat && del.origemLng){
+      const kmReta=distKm(_gpsLat,_gpsLng,del.origemLat,del.origemLng);
+      if(kmReta<=SEARCH_RADIUS_KM){
+        del._distKm=kmReta;       // placeholder linha reta
+        del._distLabel="~"+kmReta.toFixed(1)+"km"; // indica estimativa
+        nearby.push(del);
+      }
+    }
+  });
+  nearby.sort((a,b)=>a._distKm-b._distKm);
+  renderDeliveries(nearby);
+
+  // Bug 2 FIX: atualiza distancias via OSRM em background para cada card
+  nearby.forEach(del=>{
+    if(!del.origemLat||!del.origemLng) return;
+    _getOsrmDistKm(_gpsLat,_gpsLng,del.origemLat,del.origemLng).then(km=>{
+      if(km===null) return; // OSRM falhou — mantém Haversine
+      const el=document.getElementById("dist-"+del.id);
+      if(el) el.textContent=km.toFixed(1)+"km pelas ruas";
+    });
+  });
+}
+
+// fetchDeliveries mantido para compatibilidade (recusar pedido reprocessa a lista)
+function fetchDeliveries(){
+  if(!_deliveriesUnsub) return; // sem listener ativo, nada a fazer
+  // listener ja esta ativo — forca re-renderizacao lendo cache local do Firestore
+  if(!_online||!_gpsOk||!window._GO) return;
+  const{db,collection,query,where,getDocs}=window._GO;
+  getDocs(query(collection(db,"deliveries"),where("status","==","waiting")))
+    .then(snap=>_processDeliveriesSnap(snap))
+    .catch(e=>console.warn("fetchDeliveries fallback:",e.message));
+}
+
+/* ═══════════════════════════════════════════════
+   RENDERIZAR PEDIDOS
+   ═══════════════════════════════════════════════ */
+function renderDeliveries(list){
+  const el=document.getElementById("deliveries-list");
+  document.getElementById("del-count").textContent=list.length;
+  if(!_online){
+    el.innerHTML=`<div class="empty-state"><div class="empty-ico">🛵</div><div class="empty-txt">Fique online para ver<br>pedidos disponíveis próximos.</div></div>`;
+    return;
+  }
+  if(!list.length){
+    el.innerHTML=`<div class="empty-state"><div class="empty-ico">🔍</div><div class="empty-txt">Nenhum pedido disponível<br>em até ${SEARCH_RADIUS_KM}km no momento.<br><span style="font-size:11px;color:var(--muted)">Atualizando em tempo real</span></div></div>`;
+    return;
+  }
+  el.innerHTML=list.map(d=>{
+    const fee=parseFloat(d.deliveryFee||0).toFixed(2).replace(".",",");
+    // v2.1.5 FEAT (pedido Falcao — entregador de frota fixo, recebe diária,
+    // não precisa ver valor por entrega, lojista decide): esconde o valor se
+    // configurado, mostrando um ícone de cadeado no lugar.
+    const feeDisplay=(_mbData&&_mbData.esconderValor)?`<span style="opacity:.6">🔒 Diária</span>`:`R$&nbsp;${fee}<span>/entrega</span>`;
+    const distLabel=d._distLabel||"";
+    return `<div class="del-card">
+      <div class="del-card-head">
+        <div>
+          <div class="del-card-store">${escHtml(d.storeName||"Loja")}</div>
+          <div class="del-card-id">#${escHtml(d.orderId||d.id.slice(0,8).toUpperCase())}</div>
+        </div>
+        <div class="del-fee">${feeDisplay}</div>
+      </div>
+      <div class="del-route">
+        <div class="del-route-item">
+          <div class="del-route-ico origin">📍</div>
+          <div class="del-route-addr">${escHtml(d.storeAddr||"Endereço da loja")}</div>
+        </div>
+        <div class="del-route-item">
+          <div class="del-route-ico dest">🏠</div>
+          <div class="del-route-addr">${escHtml(d.destAddr||"Endereço do cliente")}</div>
+        </div>
+      </div>
+      ${distLabel?`<div class="del-dist"><div class="del-dist-dot"></div><span id="dist-${d.id}">${distLabel}</span></div><div style="height:10px"></div>`:""}
+      <div style="display:flex;gap:8px">
+        <button class="btn-accept" style="flex:1" onclick="openAcceptModal('${d.id}')">⚡ Aceitar</button>
+        <button class="btn-recusar" onclick="recusarEntrega('${d.id}')">✕</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+/* ═══════════════════════════════════════════════
+   RECUSAR PEDIDO
+   ═══════════════════════════════════════════════ */
+function recusarEntrega(deliveryId){
+  _recusados[deliveryId]=Date.now();
+  _saveRecusados();
+  fetchDeliveries();
+  toast("Pedido ocultado por 30 minutos.");
+}
+
+/* v1.9.1 (bug #3): persiste _recusados no documento do motoboy. Falha silenciosa
+   é aceitável aqui — pior caso é o pedido recusado reaparecer antes do previsto
+   se o app reiniciar logo após a falha de rede, não é um erro que bloqueia o uso. */
+function _saveRecusados(){
+  if(!window._GO||!_mbId) return;
+  try{
+    const{db,doc,setDoc}=window._GO;
+    setDoc(doc(db,"motoboys",_mbId),{recusados:_recusados},{merge:true}).catch(e=>console.warn("[Pedix Go] _saveRecusados falhou:",e.message));
+  }catch(_){}
+}
+
+/* ═══════════════════════════════════════════════
+   HISTÓRICO DE ENTREGAS — com filtro de período
+   periodo: 'hoje' | 'semana' | 'mes' | 'tudo' (padrão: 'hoje')
+   ═══════════════════════════════════════════════ */
+let _histPeriodo='hoje'; // período ativo no momento
+
+function _histGetRange(periodo){
+  const now=new Date();
+  let desde=0;
+  if(periodo==='hoje'){
+    const d=new Date(now.getFullYear(),now.getMonth(),now.getDate());
+    desde=d.getTime();
+  } else if(periodo==='semana'){
+    const d=new Date(now); d.setDate(d.getDate()-6); d.setHours(0,0,0,0);
+    desde=d.getTime();
+  } else if(periodo==='mes'){
+    const d=new Date(now.getFullYear(),now.getMonth(),1);
+    desde=d.getTime();
+  }
+  // 'tudo' → desde=0 (sem filtro)
+  return desde;
+}
+
+async function loadHistorico(periodo){
+  if(!window._GO||!_mbId) return;
+  // Atualiza período ativo e destaca botão
+  if(periodo) _histPeriodo=periodo;
+  document.querySelectorAll('.hist-period-btn').forEach(b=>{
+    b.classList.toggle('active', b.textContent.toLowerCase().replace('esta ','').replace(' ','')===
+      ({hoje:'hoje',semana:'semana',mes:'mês',tudo:'tudo'}[_histPeriodo]||_histPeriodo));
+  });
+  // Sincroniza botões pelo índice — mais seguro que texto
+  const btnMap={hoje:0,semana:1,mes:2,tudo:3};
+  document.querySelectorAll('.hist-period-btn').forEach((b,i)=>b.classList.toggle('active',i===btnMap[_histPeriodo]));
+
+  showScreen("screen-historico");
+  const el=document.getElementById("hist-content");
+  el.innerHTML=`<div class="empty-state"><div class="ld-spinner" style="margin:0 auto"></div></div>`;
+  try{
+    const{db,collection,getDocs,query,where}=window._GO;
+    const desde=_histGetRange(_histPeriodo);
+    // AUDIT FIX (v2.0.3): query composta motoboyId+deliveredAt exigiria indice
+    // composto inexistente — substituida por query simples em motoboyId e filtro
+    // de data em memoria.
+    const q=query(collection(db,"historico"),where("motoboyId","==",_mbId));
+    const snap=await getDocs(q);
+    const entregas=snap.docs
+      .map(d=>({id:d.id,...d.data()}))
+      .filter(e=>desde===0||((e.deliveredAt||0)>=desde));
+    // Agrupa por loja (storeName+storeAddr, mais específico que só o nome — evita
+    // misturar lojistas diferentes que usem o mesmo nome de fantasia)
+    const porLoja={};
+    entregas.forEach(e=>{
+      const lojaKey=(e.storeName||"Loja")+"|"+(e.storeAddr||"");
+      if(!porLoja[lojaKey]) porLoja[lojaKey]={nome:e.storeName||"Loja",count:0,total:0,totalPendente:0,entregas:[]};
+      porLoja[lojaKey].count++;
+      porLoja[lojaKey].total+=parseFloat(e.deliveryFee||0);
+      if(!e.isPaid) porLoja[lojaKey].totalPendente+=parseFloat(e.deliveryFee||0);
+      porLoja[lojaKey].entregas.push(e);
+    });
+    const lojas=Object.values(porLoja).sort((a,b)=>b.totalPendente-a.totalPendente);
+    const totalPendente=entregas.reduce((s,e)=>e.isPaid?s:s+parseFloat(e.deliveryFee||0),0);
+    const totalGeral=entregas.reduce((s,e)=>s+parseFloat(e.deliveryFee||0),0);
+    const periodoLabel={hoje:'hoje',semana:'nesta semana',mes:'neste mês',tudo:'no total'}[_histPeriodo]||'';
+    if(!entregas.length){
+      el.innerHTML=`<div class="empty-state"><div class="empty-ico">📦</div><div class="empty-txt">Nenhuma entrega concluída ${periodoLabel}.</div></div>`;
+      return;
+    }
+    window._histLojasCache=lojas.map((l)=>l.nome+"|"+(l.entregas[0]?.storeAddr||""));
+    el.innerHTML=`
+      <div class="hist-total">
+        <div style="font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px">Total a receber</div>
+        <div style="font-family:var(--font-head);font-size:40px;font-weight:900;color:var(--green);letter-spacing:-1px">R$ ${totalPendente.toFixed(2).replace(".",",")}</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:4px">${entregas.length} entrega${entregas.length!==1?"s":""} ${periodoLabel}</div>
+        ${totalGeral!==totalPendente?`<div style="font-size:12px;color:var(--muted);margin-top:2px">Total bruto: <strong>R$ ${totalGeral.toFixed(2).replace(".",",")}</strong></div>`:""}
+      </div>
+      ${lojas.map((l,li)=>{
+        const lojaKey=l.nome+"|"+(l.entregas[0]?.storeAddr||"");
+        const temPendente=l.totalPendente>0;
+        return `
+        <div class="hist-card">
+          <div class="hist-card-head">
+            <div>
+              <div style="font-family:var(--font-head);font-size:18px;font-weight:800">${escHtml(l.nome)}</div>
+              <div style="font-size:12px;color:var(--muted);margin-top:2px">${l.count} entrega${l.count!==1?"s":""} · total R$ ${l.total.toFixed(2).replace(".",",")}</div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-family:var(--font-head);font-size:22px;font-weight:900;color:${temPendente?"var(--green)":"var(--muted)"}">R$ ${l.totalPendente.toFixed(2).replace(".",",")}</div>
+              <div style="font-size:10px;color:var(--muted);font-weight:600">a receber</div>
+            </div>
+          </div>
+          ${temPendente?`<button class="btn-confirm-loja" onclick="_histConfirmarLote(${li})" style="width:100%;margin:8px 0;padding:9px;border-radius:10px;border:1px solid var(--green);background:rgba(34,197,94,.08);color:var(--green);font-weight:700;font-size:13px;cursor:pointer">✅ Confirmar todas dessa loja</button>`:""}
+          <div class="hist-entregas">
+            ${l.entregas.sort((a,b)=>(b.deliveredAt||0)-(a.deliveredAt||0)).slice(0,8).map(e=>{
+              const data=e.deliveredAt?new Date(e.deliveredAt).toLocaleDateString("pt-BR"):"";
+              const hora=e.deliveredAt?new Date(e.deliveredAt).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"}):"";
+              const fee=parseFloat(e.deliveryFee||0).toFixed(2).replace(".",",");
+              return `<div class="hist-item" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+                <span style="font-size:12px;color:var(--muted2)">${data} ${hora} • #${escHtml(e.orderId||e.id.slice(0,6).toUpperCase())}</span>
+                <span style="display:flex;align-items:center;gap:8px">
+                  <span style="font-size:13px;font-weight:700;color:var(--green)">R$ ${fee}</span>
+                  ${e.isPaid
+                    ? `<span style="font-size:11px;color:var(--muted);font-weight:700">✅ Pago</span>`
+                    : `<button onclick="_histConfirmarPagamento('${e.id}')" style="font-size:11px;font-weight:700;color:var(--green);background:none;border:1px solid var(--green);border-radius:8px;padding:3px 8px;cursor:pointer">Confirmar</button>`}
+                </span>
+              </div>`;
+            }).join("")}
+            ${l.entregas.length>8?`<div style="font-size:11px;color:var(--muted);text-align:center;padding:8px 0">+${l.entregas.length-8} entrega${l.entregas.length-8!==1?"s":""} anteriores</div>`:""}
+          </div>
+        </div>
+      `;}).join("")}
+    `;
+  }catch(e){
+    el.innerHTML=`<div class="empty-state"><div class="empty-ico">❌</div><div class="empty-txt">${escHtml(e.message)}</div></div>`;
+  }
+}
+
+/* v1.9.2 FIX (bug #8): motoboy confirma manualmente que já recebeu o valor de uma
+   entrega (em dinheiro/PIX direto com o lojista, fora do app) — marca isPaid:true,
+   removendo-a do "Total a receber". Falha de rede aqui não é crítica: o pior caso é
+   o valor continuar contando como pendente até uma nova tentativa. */
+async function _histConfirmarPagamento(historicoId){
+  if(!window._GO) return;
+  try{
+    const{db,doc,updateDoc}=window._GO;
+    await updateDoc(doc(db,"historico",historicoId),{isPaid:true,paidAt:Date.now()});
+    toast("✅ Recebimento confirmado");
+    loadHistorico(); // recarrega com período ativo
+  }catch(e){
+    toast("⚠ Erro ao confirmar: "+e.message);
+  }
+}
+
+/* v1.9.2 (bug #8): confirma em lote todas as entregas pendentes de UMA loja
+   específica (storeName+storeAddr) — usado pelo botão "Confirmar todas dessa loja". */
+async function _histConfirmarLote(lojaIdx){
+  // AUDIT FIX (v2.0.3): parametro mudou de lojaKey (string com texto livre que
+  // podia ter apostrofo — injecao via onclick) para lojaIdx (indice numerico seguro).
+  // A chave da loja e resolvida internamente a partir do cache _histLojasCache.
+  if(!window._GO||!_mbId) return;
+  const lojaKey = window._histLojasCache && window._histLojasCache[lojaIdx];
+  if(!lojaKey){ toast("Erro: loja não encontrada"); return; }
+  try{
+    const{db,collection,getDocs,query,where,doc,updateDoc}=window._GO;
+    const [storeName,storeAddr]=lojaKey.split("|");
+    // AUDIT FIX (v2.0.3): query simples em motoboyId, filtro em memoria.
+    const q=query(collection(db,"historico"),where("motoboyId","==",_mbId));
+    const snap=await getDocs(q);
+    const pendentes=snap.docs.filter(d=>{
+      const data=d.data();
+      return !data.isPaid && (data.storeName||"")===storeName && (data.storeAddr||"")===storeAddr;
+    });
+    if(!pendentes.length){ toast("Nenhuma entrega pendente dessa loja"); return; }
+    await Promise.all(pendentes.map(d=>updateDoc(doc(db,"historico",d.id),{isPaid:true,paidAt:Date.now()})));
+    toast(`✅ ${pendentes.length} entrega${pendentes.length!==1?"s":""} confirmada${pendentes.length!==1?"s":""}`);
+    loadHistorico(); // recarrega com período ativo
+  }catch(e){
+    toast("⚠ Erro ao confirmar lote: "+e.message);
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   ACEITAR PEDIDO
+   ═══════════════════════════════════════════════ */
+function openAcceptModal(deliveryId){
+  _pendingAcceptId=deliveryId;
+  document.getElementById("modal-accept-sub").textContent="Confirme para aceitar este pedido. Ele será bloqueado para outros motoboys.";
+  openModal("modal-accept");
+}
+
+async function confirmAccept(){
+  if(!_pendingAcceptId||!window._GO){closeModal("modal-accept");return;}
+  closeModal("modal-accept");
+
+  // Bug 4 FIX (v2.0.1): __deliver__ foi desacoplado para modal-deliver proprio.
+  // Mantido aqui apenas como seguranca caso chamado por caminho legado.
+  if(_pendingAcceptId==="__deliver__"){
+    await doDeliver(); return;
+  }
+
+  // Bug 4 FIX (v2.0.1): para o polling ANTES da transacao para evitar que
+  // um novo fetchDeliveries dispare enquanto o aceite esta em andamento,
+  // causando o loop onde o mesmo pedido reaparecea como "waiting" e podia
+  // ser aceito novamente antes da transacao concluir no Firestore.
+  stopPolling();
+
+  // Desabilita botao de aceite no card para feedback imediato ao usuario
+  const btn=document.querySelector(".btn-accept");
+  if(btn){ btn.disabled=true; btn.textContent="Aceitando..."; }
+
+  // Aceite normal — transacao atomica (protege contra aceite duplo)
+  const{db,doc,runTransaction,arrayUnion}=window._GO;
+  // v2.1.3 FEAT (pedido Falcao — motoboy de FROTA pode aceitar mais de uma
+  // entrega ao mesmo tempo, sem limite, escolhendo quantas quiser; motoboy
+  // AVULSO continua exatamente como antes, uma entrega por vez): frota usa
+  // um campo separado (activeOrderIds, lista) em vez de sobrescrever
+  // activeOrderId (que continua sendo só do fluxo avulso, sem mudança).
+  const isFrota = _mbData && _mbData.tipo==='frota';
+  try{
+    const delivRef=doc(db,"deliveries",_pendingAcceptId);
+    const mbRef   =doc(db,"motoboys",_mbId);
+    let jaAceito=false;
+    await runTransaction(db,async tx=>{
+      const delSnap=await tx.get(delivRef);
+      if(!delSnap.exists()) throw new Error("Pedido não encontrado.");
+      const data=delSnap.data();
+      // Bug 4 FIX: dupla verificacao — status E motoboyId para garantir
+      // que mesmo se o polling ja tiver rodado, nao aceita em duplicata
+      if(data.status!=="waiting"){
+        jaAceito=true;
+        throw new Error("Pedido ja foi aceito por outro motoboy.");
+      }
+      // v2.2.1 FIX CRÍTICO GRAVE (relato Falcao — "não aceita duas entregas,
+      // uma some" + "se deslogar e logar de novo a primeira reaparece"):
+      // achado real — pro AVULSO (não frota), esse update sempre
+      // SOBRESCREVIA activeOrderId com a entrega nova, sem checar se ele já
+      // tinha uma ativa. A entrega antiga continuava "assigned" a ele de
+      // verdade no Firestore (nunca foi perdida no banco), só que o app
+      // parava de rastrear ela (só guarda 1 id por vez pro avulso) — por
+      // isso "sumia" da tela, e reaparecia se algo relesse o valor antigo
+      // (deslogar/logar de novo, restauração de sessão). Corrigido: lê o
+      // motoboys/{uid} DENTRO da mesma transação (consistente, sem corrida)
+      // e recusa o aceite com erro claro se o avulso já tiver uma entrega
+      // ativa — frota continua podendo aceitar quantas quiser (activeOrderIds,
+      // lista, comportamento correto e não muda aqui).
+      if(!isFrota){
+        const mbSnap=await tx.get(mbRef);
+        const mbAtual=mbSnap.exists()?mbSnap.data():{};
+        if(mbAtual.activeOrderId && mbAtual.activeOrderId!==_pendingAcceptId){
+          throw new Error("Você já tem uma entrega em andamento — finalize ou cancele antes de aceitar outra.");
+        }
+      }
+      // v2.1.9 FIX (relato Falcao — Kanban do lojista nunca mostrava "A
+      // caminho" pra entrega de frota, ficava travado em "Pronto" até pular
+      // direto pra "Entregue"): frota é baseada na loja — ao contrário do
+      // avulso, que pode aceitar remotamente e precisar se deslocar até a
+      // loja primeiro, aceitar já significa estar pegando o pedido ali
+      // mesmo. Status vai direto pra "picked" (não "assigned") só pra
+      // frota — o Burger escuta esse status e atualiza o Kanban pra "A
+      // caminho" no mesmo instante do aceite, refletindo a realidade.
+      const statusInicial = isFrota ? "picked" : "assigned";
+      const extraFields = isFrota ? {pickedAt:Date.now()} : {};
+      tx.update(delivRef,{status:statusInicial,motoboyId:_mbId,assignedAt:Date.now(),...extraFields});
+      if(isFrota){
+        tx.update(mbRef,{activeOrderIds:arrayUnion(_pendingAcceptId),online:true,lastActiveAt:Date.now()});
+      } else {
+        tx.update(mbRef,{activeOrderId:_pendingAcceptId,online:true,lastActiveAt:Date.now()});
+      }
+    });
+    const deliveryIdAceito=_pendingAcceptId;
+    _pendingAcceptId=null;
+    if(isFrota){
+      // Mantém _mbData.activeOrderIds em sincronia localmente, sem precisar reler do servidor
+      if(!_mbData.activeOrderIds) _mbData.activeOrderIds=[];
+      if(!_mbData.activeOrderIds.includes(deliveryIdAceito)) _mbData.activeOrderIds.push(deliveryIdAceito);
+      await loadActiveDeliveries();
+      toast("Pedido aceito! "+_mbData.activeOrderIds.length+" entrega(s) ativa(s).");
+    } else {
+      _activeDelivery=null;
+      await loadActiveDelivery(deliveryIdAceito);
+      toast("Pedido aceito! Vá até a loja.");
+    }
+  }catch(e){
+    toast("Erro: "+e.message);
+    _pendingAcceptId=null;
+    // Bug 4 FIX: se falhou, volta a buscar pedidos (sem loop — polling nao estava rodando)
+    if(_online) startPolling();
+  }
+}
+
+/* ═══════════════════════════════════════════════
+   ENTREGA ATIVA
+   ═══════════════════════════════════════════════ */
+async function loadActiveDelivery(deliveryId){
+  if(!window._GO) return;
+  try{
+    const{db,doc,getDoc}=window._GO;
+    const snap=await getDoc(doc(db,"deliveries",deliveryId));
+    if(!snap.exists()){
+      await clearActiveOrder();
+      showScreen("screen-dash");
+      initGPS(); return;
+    }
+    _activeDelivery={id:snap.id,...snap.data()};
+    if(_activeDelivery.status==="cancelled_by_store"){
+      // Pedido já tinha sido cancelado pela loja antes mesmo de abrir a tela
+      await _handleDeliveryCancelledByStore();
+      return;
+    }
+    renderActiveDelivery();
+    showScreen("screen-delivery");
+    // Pequeno delay para garantir que a tela esteja visível antes de iniciar o mapa
+    setTimeout(initDeliveryMap, 100);
+    _watchActiveDelivery(deliveryId);
+  }catch(e){
+    toast("⚠ Erro ao carregar entrega: "+e.message);
+    showScreen("screen-dash");
+    initGPS();
+  }
+}
+
+/* v1.9.1 FIX (bug #9 — grave): escuta em tempo real o delivery ativo para
+   detectar se a loja cancelou o pedido (status muda para "cancelled_by_store")
+   enquanto o motoboy está com a tela de entrega aberta. Sem isso, o motoboy só
+   descobriria ao tentar confirmar coleta/entrega e dar erro, ou nunca, se ficasse
+   parado na tela. */
+function _watchActiveDelivery(deliveryId){
+  if(!window._GO) return;
+  if(_activeDeliveryUnsub){ _activeDeliveryUnsub(); _activeDeliveryUnsub=null; }
+  const{db,doc,onSnapshot}=window._GO;
+  _activeDeliveryUnsub=onSnapshot(doc(db,"deliveries",deliveryId), snap=>{
+    if(!snap.exists()) return;
+    const data=snap.data();
+    if(data.status==="cancelled_by_store" && _activeDelivery && _activeDelivery.id===deliveryId){
+      _handleDeliveryCancelledByStore();
+    }
+  });
+}
+
+async function _handleDeliveryCancelledByStore(){
+  if(_activeDeliveryUnsub){ _activeDeliveryUnsub(); _activeDeliveryUnsub=null; }
+  stopDeliveryMap(); // encerra mapa e GPS watch
+  try{
+    if(window._GO && _mbId){
+      const{db,doc,setDoc}=window._GO;
+      await setDoc(doc(db,"motoboys",_mbId),{activeOrderId:null,lastActiveAt:Date.now()},{merge:true});
+    }
+  }catch(_){}
+  if(_mbData) _mbData.activeOrderId=null;
+  _activeDelivery=null;
+  toast("⚠ Este pedido foi cancelado pela loja. Você foi liberado para outras entregas.",5000);
+  showScreen("screen-dash");
+  if(_online) startPolling();
+}
+
+function renderActiveDelivery(){
+  if(!_activeDelivery) return;
+  const d=_activeDelivery;
+  const isPicked=d.status==="picked";
+  document.getElementById("del-store-name").textContent=d.storeName||"—";
+  document.getElementById("del-store-addr").textContent=d.storeAddr||"—";
+  document.getElementById("del-dest-addr").textContent=d.destAddr||"—";
+  const fee=parseFloat(d.deliveryFee||0).toFixed(2).replace(".",",");
+  // v2.1.5 FEAT: mesmo motivo do card de aceite — esconde valor se configurado
+  document.getElementById("del-fee-val").textContent=(_mbData&&_mbData.esconderValor)?"🔒 Diária":"R$ "+fee;
+  const badge=document.getElementById("delivery-badge");
+  badge.textContent=isPicked?"EM ROTA":"COLETANDO";
+  badge.className="delivery-badge "+(isPicked?"picked":"assigned");
+  document.getElementById("step-collect").className="step-item "+(isPicked?"done":"active");
+  document.getElementById("step-deliver").className="step-item "+(isPicked?"active":"");
+  document.getElementById("step-done").className="step-item";
+  // FIX (relato Falcao — trava na 2ª entrega): renderActiveDelivery() só
+  // alternava style.display dos botões de ação, nunca restaurava disabled/
+  // textContent. confirmCollect() desabilita btn-collected e troca o texto
+  // para "Confirmando..." só revertendo isso no catch (erro) — no caminho de
+  // sucesso o botão ficava preso desabilitado, escondido atrás do passo
+  // seguinte (display:none) na 1ª entrega, e reaparecia já travado quando o
+  // motoboy aceitava a 2ª entrega (mesmo botão reaproveitado, sem reset).
+  // Centralizado aqui: todo render do estado ativo garante botão limpo,
+  // independente de qual entrega/caminho gerou o estado anterior.
+  const btnCollect=document.getElementById("btn-collected");
+  btnCollect.disabled=false;
+  btnCollect.textContent="📦 Confirmei a coleta na loja";
+  btnCollect.style.display=isPicked?"none":"block";
+  document.getElementById("btn-delivered").style.display=isPicked?"block":"none";
+  const btnConfirmDeliver=document.getElementById("btn-confirm-deliver");
+  if(btnConfirmDeliver){ btnConfirmDeliver.disabled=false; } // doDeliver() nunca reabilitava, nem no sucesso nem no erro
+  // Bug 1 FIX (v2.0.4): "Ir ao cliente" bloqueado até coleta confirmada
+  const btnDest=document.getElementById("btn-nav-dest");
+  if(btnDest){
+    btnDest.disabled=!isPicked;
+    btnDest.style.opacity=isPicked?"1":"0.4";
+    btnDest.title=isPicked?"":"Confirme a coleta na loja primeiro";
+  }
+  // FIX (pedido Falcao): "Ir à loja" trava depois da coleta confirmada —
+  // depois de coletado não tem mais motivo pra voltar pra loja, e deixar
+  // ativo gera confusão (motoboy clica achando que ainda precisa ir lá).
+  const btnStore=document.getElementById("btn-nav-store");
+  if(btnStore){
+    btnStore.disabled=isPicked;
+    btnStore.style.opacity=isPicked?"0.4":"1";
+    btnStore.title=isPicked?"Coleta já confirmada — siga para o cliente":"";
+  }
+}
+
+// Bug 3 FIX (v2.0.1): modal de confirmacao por etapa
+function markCollected(){
+  if(!_activeDelivery) return;
+  openModal("modal-collect");
+}
+
+async function confirmCollect(){
+  closeModal("modal-collect");
+  if(!_activeDelivery||!window._GO) return;
+  const btn=document.getElementById("btn-collected");
+  btn.disabled=true; btn.textContent="Confirmando...";
+  try{
+    const{db,doc,updateDoc}=window._GO;
+    await updateDoc(doc(db,"deliveries",_activeDelivery.id),{
+      status:"picked", pickedAt:Date.now()
+    });
+    _activeDelivery.status="picked";
+    renderActiveDelivery();
+    toast("Coleta confirmada! Agora entregue ao cliente.");
+  }catch(e){
+    toast("Erro: "+e.message);
+    btn.disabled=false; btn.textContent="Confirmei a coleta na loja";
+  }
+}
+
+// Bug 3 FIX: modal dedicado para entrega ao cliente
+// v2.2.2 FEAT (relato Falcao — "só finalizar a entrega quando ele receber
+// o pagamento"): pagamento "Pix" é antecipado (pago na hora do pedido, o
+// entregador não cobra nada) — segue o texto normal do botão. Qualquer
+// outra forma (Débito, Crédito, Dinheiro, Pix na Entrega) é cobrada NA
+// hora da entrega — mostra o valor bem visível e muda o texto do botão
+// pra deixar explícito que confirmar a entrega TAMBÉM confirma que o
+// pagamento foi recebido, evitando o entregador finalizar sem cobrar.
+function openDeliverModal(){
+  const box=document.getElementById('deliver-payment-box');
+  const info=document.getElementById('deliver-payment-info');
+  const btn=document.getElementById('btn-confirm-deliver');
+  const pagamento=_activeDelivery?.orderPayment||'';
+  const valor=_activeDelivery?.orderTotal;
+  const _pagoAntecipado = pagamento==='Pix' || !pagamento || pagamento==='—';
+  if(!_pagoAntecipado && typeof valor==='number' && valor>0){
+    if(box) box.style.display='block';
+    if(info) info.textContent=(pagamento||'—')+' — R$ '+valor.toFixed(2).replace('.',',');
+    if(btn) btn.textContent='✅ Sim, entreguei e recebi o pagamento';
+  } else {
+    if(box) box.style.display='none';
+    if(btn) btn.textContent='✅ Sim, entreguei ao cliente';
+  }
+  openModal("modal-deliver");
+}
+
+
+
+async function doDeliver(){
+  if(!_activeDelivery||!window._GO) return;
+  // Bug 2 FIX (v2.0.4): fecha modal e desabilita botão imediatamente — evita trava e duplo-clique
+  closeModal("modal-deliver");
+  const btnDeliver=document.getElementById("btn-confirm-deliver");
+  if(btnDeliver){ btnDeliver.disabled=true; }
+  if(_activeDeliveryUnsub){ _activeDeliveryUnsub(); _activeDeliveryUnsub=null; }
+  stopDeliveryMap(); // encerra mapa e GPS watch
+  try{
+    const{db,doc,updateDoc,setDoc}=window._GO;
+    await updateDoc(doc(db,"deliveries",_activeDelivery.id),{
+      status:"delivered", deliveredAt:Date.now()
+    });
+    // Grava no histórico
+    try{
+      const{addDoc,collection:col}=window._GO;
+      // v2.0.8: monta payload base e injeta campos extras de frota quando aplicável.
+      // motoboyNome: evita lookup em motoboys/{uid} que nao existe pra frota propria.
+      // frotaCodigo: permite loadRepFrota() do Burger cruzar por codigo (nao por UID)
+      //   e loadRepMotoboys() excluir essas entregas da lista de externos.
+      // Campos ficam undefined (nao gravados) para motoboy avulso — sem efeito.
+      const _histPayload = {
+        motoboyId:   _mbId,
+        deliveryId:  _activeDelivery.id,
+        tenantUid:   _activeDelivery.tenantUid||"",
+        storeName:   _activeDelivery.storeName||"",
+        storeAddr:   _activeDelivery.storeAddr||"",
+        destAddr:    _activeDelivery.destAddr||"",
+        deliveryFee: parseFloat(_activeDelivery.deliveryFee||0),
+        orderId:     _activeDelivery.orderId||"",
+        deliveredAt: Date.now(),
+        isPaid:      false
+      };
+      if(_mbData && _mbData.nome) _histPayload.motoboyNome = _mbData.nome;
+      if(_frotaCodigo)            _histPayload.frotaCodigo = _frotaCodigo;
+      await addDoc(col(db,"historico"), _histPayload);
+    }catch(_){}
+    await setDoc(doc(db,"motoboys",_mbId),{
+      activeOrderId:null, lastActiveAt:Date.now()
+    },{merge:true});
+    _activeDelivery=null;
+    if(_mbData) _mbData.activeOrderId=null;
+    toast("🎉 Entrega concluída! Bom trabalho!");
+    showScreen("screen-dash");
+    // Verifica se sessão estava pendente de logout
+    if(window._pendingSessionLogout){
+      window._pendingSessionLogout=false;
+      toast("Sessão encerrada. Até amanhã! 🌙", 4000);
+      setTimeout(doLogout, 1500);
+      return;
+    }
+    if(_online) startPolling();
+  }catch(e){
+    toast("⚠ Erro ao finalizar: "+e.message);
+    // FIX (mesma classe do bug relatado pelo Falcao em btn-collected): o
+    // botão era desabilitado no início da função mas nunca reabilitado em
+    // caso de falha — uma falha de rede travava a confirmação de entrega
+    // pro resto da sessão, sem chance de tentar de novo na mesma corrida.
+    if(btnDeliver){ btnDeliver.disabled=false; }
+  }
+}
+
+async function confirmCancel(){
+  closeModal("modal-cancel");
+  if(!_activeDelivery||!window._GO) return;
+  if(_activeDeliveryUnsub){ _activeDeliveryUnsub(); _activeDeliveryUnsub=null; } // v1.9.1: encerra escuta antes de cancelar
+  stopDeliveryMap(); // encerra mapa e GPS watch
+  try{
+    const{db,doc,updateDoc,setDoc}=window._GO;
+    await updateDoc(doc(db,"deliveries",_activeDelivery.id),{
+      status:"waiting", motoboyId:null, cancelledAt:Date.now()
+    });
+    await setDoc(doc(db,"motoboys",_mbId),{
+      activeOrderId:null, lastActiveAt:Date.now()
+    },{merge:true});
+    _activeDelivery=null;
+    toast("⚠ Entrega cancelada. O pedido voltou para a fila.");
+    showScreen("screen-dash");
+    if(_online) startPolling();
+  }catch(e){
+    toast("⚠ Erro ao cancelar: "+e.message);
+  }
+}
+
+async function clearActiveOrder(){
+  if(!_mbId||!window._GO) return;
+  try{
+    const{db,doc,setDoc}=window._GO;
+    await setDoc(doc(db,"motoboys",_mbId),{activeOrderId:null},{merge:true});
+  }catch(_){}
+}
+
+/* ═══════════════════════════════════════════════
+   NAVEGAÇÃO GPS
+   ═══════════════════════════════════════════════ */
+function openMaps(type){
+  if(!_activeDelivery) return;
+  let lat,lng;
+  if(type==="origin"){ lat=_activeDelivery.origemLat; lng=_activeDelivery.origemLng; }
+  else { lat=_activeDelivery.destLat; lng=_activeDelivery.destLng; }
+  if(!lat||!lng){ toast("Coordenadas não disponíveis."); return; }
+  window.open(`https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}&travelmode=driving`,"_blank");
+}
+
+/* ═══════════════════════════════════════════════
+   MAPA LEAFLET — ENTREGA ATIVA
+   ═══════════════════════════════════════════════ */
+let _map            = null;
+let _mapMbMarker    = null;   // marcador do motoboy (atualiza com GPS)
+let _mapStoreMarker = null;
+let _mapDestMarker  = null;
+let _mapRouteLine   = null;
+let _mapGpsWatch    = null;
+
+/* Ícones personalizados via DivIcon (sem imagem externa) */
+function _mkIcon(emoji, color){
+  return L.divIcon({
+    className:'',
+    html:`<div style="
+      width:36px;height:36px;border-radius:50%;
+      background:${color};border:3px solid #fff;
+      box-shadow:0 2px 8px rgba(0,0,0,.3);
+      display:flex;align-items:center;justify-content:center;
+      font-size:16px;line-height:1
+    ">${emoji}</div>`,
+    iconSize:[36,36], iconAnchor:[18,18], popupAnchor:[0,-20]
+  });
+}
+
+function initDeliveryMap(){
+  if(!window.L) return;          // Leaflet não carregou
+  const d=_activeDelivery;
+  if(!d) return;
+
+  // Aguarda o elemento estar visível (pode estar hidden antes de showScreen)
+  const mapEl=document.getElementById("delivery-map");
+  if(!mapEl) return;
+
+  // Destrói mapa anterior se existir
+  if(_map){ _map.remove(); _map=null; }
+
+  // Coordenadas disponíveis
+  const hasStore = d.origemLat && d.origemLng;
+  const hasDest  = d.destLat   && d.destLng;
+  const hasMb    = _gpsLat     && _gpsLng;
+
+  // Centro inicial: loja ou motoboy ou destino
+  const centerLat = hasStore ? d.origemLat : (hasMb ? _gpsLat : (hasDest ? d.destLat : -15.8));
+  const centerLng = hasStore ? d.origemLng : (hasMb ? _gpsLng : (hasDest ? d.destLng : -47.9));
+
+  _map = L.map("delivery-map", {
+    center:[centerLat, centerLng],
+    zoom:14,
+    zoomControl:true,
+    attributionControl:false
+  });
+
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{
+    maxZoom:19, subdomains:['a','b','c']
+  }).addTo(_map);
+
+  // Marcador: loja
+  if(hasStore){
+    _mapStoreMarker = L.marker([d.origemLat, d.origemLng], {icon:_mkIcon('🏪','#2563eb')})
+      .addTo(_map)
+      .bindPopup(`<b>${escHtml(d.storeName||'Loja')}</b><br>${escHtml(d.storeAddr||'')}`);
+  }
+
+  // Marcador: cliente
+  if(hasDest){
+    _mapDestMarker = L.marker([d.destLat, d.destLng], {icon:_mkIcon('🏠','#10b981')})
+      .addTo(_map)
+      .bindPopup(`<b>Cliente</b><br>${escHtml(d.destAddr||'')}`);
+  }
+
+  // Marcador: motoboy (posição atual do GPS)
+  if(hasMb){
+    _mapMbMarker = L.marker([_gpsLat, _gpsLng], {icon:_mkIcon('🛵','#f59e0b')})
+      .addTo(_map)
+      .bindPopup("Sua posição atual");
+  }
+
+  // Ajusta zoom para mostrar todos os pontos
+  const pts=[];
+  if(hasMb)    pts.push([_gpsLat, _gpsLng]);
+  if(hasStore) pts.push([d.origemLat, d.origemLng]);
+  if(hasDest)  pts.push([d.destLat, d.destLng]);
+  if(pts.length>1) _map.fitBounds(L.latLngBounds(pts), {padding:[40,40]});
+
+  // Força redimensionamento (necessário quando mapa inicia oculto)
+  setTimeout(()=>{ if(_map) _map.invalidateSize(); }, 300);
+
+  // Desenha rota via OSRM (linha real pelas ruas)
+  _drawOsrmRoute();
+
+  // Inicia atualização contínua do marcador do motoboy via GPS
+  _startMapGpsUpdate();
+}
+
+async function _drawOsrmRoute(){
+  if(!_activeDelivery||!_map) return;
+  const d=_activeDelivery;
+  const pts=[];
+  if(_gpsLat && _gpsLng)         pts.push(`${_gpsLng},${_gpsLat}`);
+  if(d.origemLat && d.origemLng) pts.push(`${d.origemLng},${d.origemLat}`);
+  if(d.destLat   && d.destLng)   pts.push(`${d.destLng},${d.destLat}`);
+  if(pts.length < 2) return;
+
+  try{
+    const url=`https://router.project-osrm.org/route/v1/driving/${pts.join(";")}?overview=full&geometries=geojson`;
+    const r=await fetch(url);
+    if(!r.ok) return;
+    const data=await r.json();
+    if(!data.routes||!data.routes[0]) return;
+    const coords=data.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]);
+    const distKmTotal=(data.routes[0].distance/1000).toFixed(1);
+    const duracaoMin=Math.round(data.routes[0].duration/60);
+
+    // Remove rota anterior
+    if(_mapRouteLine){ _map.removeLayer(_mapRouteLine); _mapRouteLine=null; }
+
+    // Linha azul da rota
+    _mapRouteLine=L.polyline(coords,{color:'#2563eb',weight:4,opacity:.75,dashArray:'8,4'}).addTo(_map);
+
+    // Badge de distância total
+    const badge=document.getElementById("map-dist-badge");
+    if(badge){ badge.textContent=`${distKmTotal} km · ~${duracaoMin} min`; badge.style.display='block'; }
+  }catch(e){
+    console.warn("[Mapa] OSRM falhou:",e.message);
+    // Fallback: linha reta simples
+    _drawFallbackLine();
+  }
+}
+
+function _drawFallbackLine(){
+  if(!_activeDelivery||!_map) return;
+  const d=_activeDelivery;
+  const pts=[];
+  if(_gpsLat && _gpsLng)         pts.push([_gpsLat,_gpsLng]);
+  if(d.origemLat && d.origemLng) pts.push([d.origemLat,d.origemLng]);
+  if(d.destLat   && d.destLng)   pts.push([d.destLat,d.destLng]);
+  if(pts.length<2) return;
+  if(_mapRouteLine){ _map.removeLayer(_mapRouteLine); _mapRouteLine=null; }
+  _mapRouteLine=L.polyline(pts,{color:'#6070a8',weight:3,opacity:.5,dashArray:'6,6'}).addTo(_map);
+}
+
+function _startMapGpsUpdate(){
+  if(_mapGpsWatch){ navigator.geolocation.clearWatch(_mapGpsWatch); _mapGpsWatch=null; }
+  if(!navigator.geolocation||!_map) return;
+  _mapGpsWatch=navigator.geolocation.watchPosition(pos=>{
+    const lat=pos.coords.latitude, lng=pos.coords.longitude;
+    _gpsLat=lat; _gpsLng=lng; _gpsOk=true;
+    if(!_map) return;
+    if(_mapMbMarker){
+      _mapMbMarker.setLatLng([lat,lng]);
+    } else {
+      _mapMbMarker=L.marker([lat,lng],{icon:_mkIcon('🛵','#f59e0b')})
+        .addTo(_map).bindPopup("Sua posição atual");
+    }
+  },()=>{},{enableHighAccuracy:true,timeout:10000,maximumAge:5000});
+}
+
+function stopDeliveryMap(){
+  if(_mapGpsWatch){ navigator.geolocation.clearWatch(_mapGpsWatch); _mapGpsWatch=null; }
+  if(_map){ _map.remove(); _map=null; }
+  _mapMbMarker=null; _mapStoreMarker=null; _mapDestMarker=null; _mapRouteLine=null;
+  const badge=document.getElementById("map-dist-badge");
+  if(badge) badge.style.display='none';
+}
+
+/* ═══════════════════════════════════════════════
+   MÚLTIPLAS ENTREGAS (frota) — v2.1.3
+   ═══════════════════════════════════════════════ */
+let _activeDeliveries=[];   // lista de docs de entrega ativos (frota)
+let _multiMap=null, _multiMapMbMarker=null, _multiMapRouteLine=null, _multiMapGpsWatch=null;
+let _multiDeliveriesUnsub=null;
+
+async function loadActiveDeliveries(){
+  if(!window._GO || !_mbData || !_mbData.activeOrderIds || !_mbData.activeOrderIds.length){
+    showScreen("screen-dash"); initGPS(); return;
+  }
+  showScreen("screen-multi-delivery");
+  const{db,doc,getDoc}=window._GO;
+  const docs=[];
+  for(const id of _mbData.activeOrderIds){
+    try{
+      const snap=await getDoc(doc(db,"deliveries",id));
+      if(snap.exists()) docs.push({id:snap.id,...snap.data()});
+    }catch(e){ console.warn("[Multi] falha ao buscar entrega "+id,e.message); }
+  }
+  _activeDeliveries=docs;
+  document.getElementById("multi-count").textContent=docs.length;
+  _renderMultiDeliveryList();
+  initMultiDeliveryMap();
+  initGPS();
+}
+
+function _renderMultiDeliveryList(){
+  const el=document.getElementById("multi-delivery-list");
+  if(!el) return;
+  if(!_activeDeliveries.length){
+    el.innerHTML='<div style="text-align:center;color:var(--muted);padding:20px;font-size:13px">Nenhuma entrega ativa no momento</div>';
+    return;
+  }
+  el.innerHTML=_activeDeliveries.map((d,i)=>`
+    <div class="info-card" style="padding:14px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px">
+        <div style="flex:1">
+          <div style="font-size:11px;color:var(--muted);font-weight:800;text-transform:uppercase">Parada ${i+1}</div>
+          <div style="font-size:14px;font-weight:800;margin-top:2px">${escHtml(d.destAddr||'Endereço não informado')}</div>
+        </div>
+        <div style="font-size:15px;font-weight:900;color:var(--green);white-space:nowrap">${(_mbData&&_mbData.esconderValor)?'🔒 Diária':'R$ '+(parseFloat(d.deliveryFee||0)).toFixed(2).replace('.',',')}</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button onclick="openMapsMulti('${escHtml(d.destAddr||'')}',${d.destLat||0},${d.destLng||0})" style="flex:1;background:#eef1fb;color:#2563eb;border:none;border-radius:10px;padding:10px;font-weight:800;font-size:12px;cursor:pointer">🗺️ Navegar</button>
+        <button onclick="confirmDeliverMulti('${d.id}')" style="flex:1;background:var(--green);color:#fff;border:none;border-radius:10px;padding:10px;font-weight:800;font-size:12px;cursor:pointer">✅ Entregue</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function openMapsMulti(addr,lat,lng){
+  if(lat && lng){
+    window.open(`https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`,"_blank");
+  } else if(addr){
+    window.open(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr)}`,"_blank");
+  }
+}
+
+function initMultiDeliveryMap(){
+  if(!window.L) return;
+  const mapEl=document.getElementById("multi-delivery-map");
+  if(!mapEl) return;
+  if(_multiMap){ _multiMap.remove(); _multiMap=null; }
+
+  const hasMb=_gpsLat && _gpsLng;
+  const first=_activeDeliveries[0];
+  const centerLat=hasMb?_gpsLat:(first&&first.destLat?first.destLat:-15.8);
+  const centerLng=hasMb?_gpsLng:(first&&first.destLng?first.destLng:-47.9);
+
+  _multiMap=L.map("multi-delivery-map",{center:[centerLat,centerLng],zoom:13,zoomControl:true,attributionControl:false});
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,subdomains:['a','b','c']}).addTo(_multiMap);
+
+  const pts=[];
+  if(hasMb){
+    _multiMapMbMarker=L.marker([_gpsLat,_gpsLng],{icon:_mkIcon('🛵','#f59e0b')}).addTo(_multiMap).bindPopup("Sua posição atual");
+    pts.push([_gpsLat,_gpsLng]);
+  }
+  // Loja (origem) — pega da primeira entrega que tiver, geralmente é a mesma pra todas (frota é de uma loja só)
+  const comOrigem=_activeDeliveries.find(d=>d.origemLat&&d.origemLng);
+  if(comOrigem){
+    L.marker([comOrigem.origemLat,comOrigem.origemLng],{icon:_mkIcon('🏪','#2563eb')}).addTo(_multiMap)
+      .bindPopup(`<b>${escHtml(comOrigem.storeName||'Loja')}</b>`);
+    pts.push([comOrigem.origemLat,comOrigem.origemLng]);
+  }
+  // Um marcador numerado por parada de entrega
+  _activeDeliveries.forEach((d,i)=>{
+    if(d.destLat && d.destLng){
+      L.marker([d.destLat,d.destLng],{icon:_mkIcon((i+1)+'️⃣','#10b981')}).addTo(_multiMap)
+        .bindPopup(`<b>Parada ${i+1}</b><br>${escHtml(d.destAddr||'')}`);
+      pts.push([d.destLat,d.destLng]);
+    }
+  });
+
+  if(pts.length>1) _multiMap.fitBounds(L.latLngBounds(pts),{padding:[30,30]});
+  setTimeout(()=>{ if(_multiMap) _multiMap.invalidateSize(); },300);
+
+  _drawMultiOsrmRoute();
+  _startMultiMapGpsUpdate();
+}
+
+async function _drawMultiOsrmRoute(){
+  if(!_multiMap || !_activeDeliveries.length) return;
+  const pts=[];
+  if(_gpsLat && _gpsLng) pts.push(`${_gpsLng},${_gpsLat}`);
+  const comOrigem=_activeDeliveries.find(d=>d.origemLat&&d.origemLng);
+  if(comOrigem) pts.push(`${comOrigem.origemLng},${comOrigem.origemLat}`);
+  _activeDeliveries.forEach(d=>{ if(d.destLat&&d.destLng) pts.push(`${d.destLng},${d.destLat}`); });
+  // v2.1.4 FEAT (relato Falcao — motoboy de frota é fixo na loja, sempre
+  // volta pra lá depois das entregas, diferente do avulso que pode seguir
+  // pra qualquer lugar): adiciona a loja de novo como último ponto, fechando
+  // o ciclo motoboy → loja → entrega 1 → entrega 2 → ... → volta pra loja.
+  if(comOrigem) pts.push(`${comOrigem.origemLng},${comOrigem.origemLat}`);
+  if(pts.length<2) return;
+  try{
+    // v2.1.3: OSRM aceita vários pontos na mesma chamada (rota sequencial
+    // pelos waypoints, na ordem em que foram aceitos) — mesma API já usada
+    // na entrega única, só que com mais paradas na URL.
+    const url=`https://router.project-osrm.org/route/v1/driving/${pts.join(";")}?overview=full&geometries=geojson`;
+    const r=await fetch(url);
+    if(!r.ok) return;
+    const data=await r.json();
+    if(!data.routes||!data.routes[0]) return;
+    const coords=data.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]);
+    const distKmTotal=(data.routes[0].distance/1000).toFixed(1);
+    const duracaoMin=Math.round(data.routes[0].duration/60);
+    if(_multiMapRouteLine){ _multiMap.removeLayer(_multiMapRouteLine); _multiMapRouteLine=null; }
+    _multiMapRouteLine=L.polyline(coords,{color:'#2563eb',weight:4,opacity:.75,dashArray:'8,4'}).addTo(_multiMap);
+    const badge=document.getElementById("multi-map-dist-badge");
+    if(badge){ badge.textContent=`${distKmTotal} km · ~${duracaoMin} min · ${_activeDeliveries.length} parada(s)`; badge.style.display='block'; }
+  }catch(e){ console.warn("[Multi Mapa] OSRM falhou:",e.message); }
+}
+
+function _startMultiMapGpsUpdate(){
+  if(_multiMapGpsWatch){ navigator.geolocation.clearWatch(_multiMapGpsWatch); _multiMapGpsWatch=null; }
+  if(!navigator.geolocation||!_multiMap) return;
+  _multiMapGpsWatch=navigator.geolocation.watchPosition(pos=>{
+    _gpsLat=pos.coords.latitude; _gpsLng=pos.coords.longitude; _gpsOk=true;
+    if(!_multiMap) return;
+    if(_multiMapMbMarker) _multiMapMbMarker.setLatLng([_gpsLat,_gpsLng]);
+    else { _multiMapMbMarker=L.marker([_gpsLat,_gpsLng],{icon:_mkIcon('🛵','#f59e0b')}).addTo(_multiMap).bindPopup("Sua posição atual"); }
+  },()=>{},{enableHighAccuracy:true,timeout:10000,maximumAge:5000});
+}
+
+function stopMultiDeliveryMap(){
+  if(_multiMapGpsWatch){ navigator.geolocation.clearWatch(_multiMapGpsWatch); _multiMapGpsWatch=null; }
+  if(_multiMap){ _multiMap.remove(); _multiMap=null; }
+  _multiMapMbMarker=null; _multiMapRouteLine=null;
+  const badge=document.getElementById("multi-map-dist-badge");
+  if(badge) badge.style.display='none';
+}
+
+// v2.1.3 FEAT: confirma UMA entrega da lista como concluída, sem afetar as
+// outras que continuam ativas — igual ao doDeliver() de entrega única, mesmo
+// padrão de gravação em historico, só que aplicado a UM item da lista.
+async function confirmDeliverMulti(deliveryId){
+  if(!window._GO) return;
+  const idx=_activeDeliveries.findIndex(d=>d.id===deliveryId);
+  if(idx===-1) return;
+  const d=_activeDeliveries[idx];
+  // v2.2.2 FEAT (relato Falcao — "só finalizar a entrega quando ele
+  // receber o pagamento", mesma lógica do doDeliver de entrega única):
+  // aqui não tem modal customizado, só o confirm() nativo — deixa a
+  // cobrança explícita na própria pergunta quando o pagamento é na
+  // entrega (não Pix antecipado).
+  const _pagamento = d.orderPayment || '';
+  const _valor = d.orderTotal;
+  const _pagoAntecipado = _pagamento==='Pix' || !_pagamento || _pagamento==='—';
+  const _msgConfirm = (!_pagoAntecipado && typeof _valor==='number' && _valor>0)
+    ? `Confirma que entregou E recebeu o pagamento?\n\n💰 Cobrar: ${_pagamento} — R$ ${_valor.toFixed(2).replace('.',',')}`
+    : "Confirmar entrega dessa parada?";
+  if(!confirm(_msgConfirm)) return;
+  try{
+    const{db,doc,updateDoc,addDoc,collection:col,setDoc,arrayRemove}=window._GO;
+    await updateDoc(doc(db,"deliveries",deliveryId),{status:"delivered",deliveredAt:Date.now()});
+    try{
+      const _histPayload={
+        motoboyId:_mbId, deliveryId:deliveryId, tenantUid:d.tenantUid||"",
+        storeName:d.storeName||"", storeAddr:d.storeAddr||"", destAddr:d.destAddr||"",
+        deliveryFee:parseFloat(d.deliveryFee||0), orderId:d.orderId||"",
+        deliveredAt:Date.now(), isPaid:false
+      };
+      if(_mbData && _mbData.nome) _histPayload.motoboyNome=_mbData.nome;
+      if(_frotaCodigo) _histPayload.frotaCodigo=_frotaCodigo;
+      await addDoc(col(db,"historico"),_histPayload);
+    }catch(_){}
+    await setDoc(doc(db,"motoboys",_mbId),{activeOrderIds:arrayRemove(deliveryId),lastActiveAt:Date.now()},{merge:true});
+    _activeDeliveries.splice(idx,1);
+    if(_mbData && _mbData.activeOrderIds){
+      _mbData.activeOrderIds=_mbData.activeOrderIds.filter(id=>id!==deliveryId);
+    }
+    toast("Entrega confirmada! ✅");
+    if(_activeDeliveries.length===0){
+      stopMultiDeliveryMap();
+      showScreen("screen-dash");
+      initGPS();
+      if(_online) startPolling();
+    } else {
+      document.getElementById("multi-count").textContent=_activeDeliveries.length;
+      _renderMultiDeliveryList();
+      initMultiDeliveryMap();
+    }
+  }catch(e){
+    toast("Erro ao confirmar: "+e.message);
+  }
+}
+
+
+document.addEventListener("DOMContentLoaded", function(){
+  document.querySelectorAll(".modal-bg").forEach(el=>
+    el.addEventListener("click",e=>{if(e.target===el)closeModal(el.id);})
+  );
+});
+</script>
+
+<!-- PWA — Service Worker desativado temporariamente para debug -->
+</body>
+</html>
