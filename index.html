@@ -1,4 +1,6 @@
 <!DOCTYPE html>
+<!-- Revision: 2026-07-21 v2.2.6 - FEAT (decisão Falcao — mesmo banner de instalação padronizado do Burger/Pizza/Petshop): adicionado banner "Instalar o Pedix Go" na tela principal (mesma posição — encaixado no topo do conteúdo, não fixo), listener beforeinstallprompt, e registro de Service Worker (que não existia aqui — sem SW registrado, o Chrome não considera o app instalável de jeito nenhum, mesmo com manifest certo). O manifest.json já é um arquivo real deployado (igual padrão do Gestor) — este código NUNCA reescreve esse link via JS, lição aprendida do bug do Petshop. IMPORTANTE: o registro do SW depende de existir um arquivo sw.js deployado na mesma pasta — se não existir ainda, falha silenciosamente e o app continua funcionando normal, só sem poder instalar.
+<!-- Revision: 2026-07-21 v2.2.5 - FIX CRÍTICO GRAVE (relato Falcao — "aceita uma entrega, quando vai adicionar outra mostra 0 disponíveis, só aparece se deslogar e logar de novo"): stopPolling() é chamado ANTES de toda transação de aceite (de propósito, evita corrida de aceite duplo), mas só era retomado no caminho de ERRO (catch) — no caminho de SUCESSO, a busca de pedidos ficava morta pra sempre. Pro avulso isso não importa (só pode ter 1 entrega mesmo), mas pra frota — que pode aceitar quantas quiser — isso travava a busca depois da 1ª entrega aceita. O botão "+ Buscar mais" não resolvia sozinho: initGPS() só recria o listener numa TRANSIÇÃO de GPS (de "não travado" pra "travado"), e o GPS já estava travado desde antes, então nunca disparava de novo. Só um logout/login (boot do zero) recriava o listener por acidente. Corrigido: retoma a busca também depois de qualquer aceite de frota bem-sucedido.
 <!-- Revision: 2026-07-20 v2.2.4 - AUDITORIA FINAL (2 correções): (1) ORTOGRAFIA — 3 mensagens visíveis ao entregador sem acento corrigidas ("loja não encontrada", "Pedido não encontrado", "Vá até a loja"). (2) UI — nome da loja no card de entrega agora trunca com "..." em vez de estourar o layout quando muito longo (white-space:nowrap + text-overflow:ellipsis em .del-card-store); endereços da rota continuam quebrando linha normalmente, de propósito — o entregador precisa ler o endereço completo.
 <!-- Revision: 2026-07-18 v2.2.3 - FEAT CRÍTICO (decisão Falcao — "internet cair na hora não pode perder o pedido, tem que persistir até a conexão voltar" — especialmente importante aqui, já que o entregador está sempre em movimento): ativada a persistência offline do Firestore (initializeFirestore + persistentLocalCache) — leituras funcionam com cache local, e ações feitas offline (aceitar, confirmar coleta/entrega) ficam na fila e sincronizam automaticamente quando a conexão voltar, mesmo que o app tenha sido fechado e reaberto nesse meio-tempo. Mesmo fix aplicado no Burger, Pizza e Petshop.
 <!-- Revision: 2026-07-18 v2.2.2 - FEAT CRÍTICO (decisão Falcao — "só finalizar a entrega quando o entregador receber o pagamento": pra Débito/Crédito/Dinheiro/Pix na entrega — pago no ato, não antecipado. Pix pré-pago continua sem exigir nada extra): modal de confirmar entrega (avulso) agora mostra o valor a cobrar e muda o texto do botão pra deixar explícito que confirmar a entrega TAMBÉM confirma que o pagamento foi recebido. Mesma lógica no fluxo de múltiplas entregas (frota), explícita na própria pergunta de confirmação. Depende do Burger/Pizza/Petshop mandarem forma de pagamento e valor total no payload da entrega — sem esses dados, segue o comportamento normal (sem etapa extra).
@@ -585,7 +587,7 @@ input,select{font-family:var(--font-body);outline:none}
   <div class="auth-box">
     <div class="auth-logo">Pedix<span>Go</span></div>
     <div class="auth-tagline">App de entregas para motoboys parceiros</div>
-    <div style="font-size:11px;color:#aaa;text-align:center;margin-top:4px;font-weight:600;letter-spacing:.5px">v2.2.4</div>
+    <div style="font-size:11px;color:#aaa;text-align:center;margin-top:4px;font-weight:600;letter-spacing:.5px">v2.2.6</div>
 
     <div class="auth-tabs">
       <button class="auth-tab active" onclick="switchTab('login')">Entrar</button>
@@ -700,6 +702,23 @@ input,select{font-family:var(--font-body);outline:none}
   <div class="session-bar">
     <div class="session-dot"></div>
     <span style="color:var(--muted2)">Sessão válida até <strong style="color:var(--blue)" id="session-expires">23:59</strong> de hoje</span>
+  </div>
+
+  <!-- v2.2.6 FEAT (decisão Falcao — mesmo banner padronizado do
+  Burger/Pizza/Petshop, mesma posição encaixada no topo do conteúdo, sem
+  posição fixa). O manifest.json daqui é um arquivo real, deployado junto
+  com o app (igual ao padrão do Gestor pros storefronts) — este banner
+  NUNCA reescreve o link do manifest via JS, só escuta beforeinstallprompt
+  e mostra/abre o prompt nativo do navegador. Lição aprendida do bug do
+  Petshop: JS reescrevendo um manifest real invalida a instalação. -->
+  <div id="install-banner" style="display:none;margin:0 0 14px;background:linear-gradient(135deg,var(--blue),var(--blue2));border-radius:14px;padding:12px 14px;align-items:center;gap:10px;box-shadow:0 4px 14px rgba(37,99,235,.3)">
+    <span style="font-size:24px">📲</span>
+    <div style="flex:1;color:#fff">
+      <div style="font-size:13px;font-weight:800">Instalar o Pedix Go</div>
+      <div style="font-size:11px;opacity:.85">Acesso rápido, direto da tela inicial</div>
+    </div>
+    <button id="ib-install-btn" type="button" style="background:#fff;color:var(--blue);border:none;border-radius:8px;padding:8px 14px;font-weight:800;font-size:12px;cursor:pointer;white-space:nowrap">Instalar</button>
+    <button id="ib-close-btn" type="button" style="background:none;border:none;color:#fff;opacity:.7;font-size:18px;cursor:pointer;padding:0 4px">✕</button>
   </div>
 
   <!-- Status toggle -->
@@ -2077,6 +2096,21 @@ async function confirmAccept(){
       if(!_mbData.activeOrderIds.includes(deliveryIdAceito)) _mbData.activeOrderIds.push(deliveryIdAceito);
       await loadActiveDeliveries();
       toast("Pedido aceito! "+_mbData.activeOrderIds.length+" entrega(s) ativa(s).");
+      // v2.2.5 FIX CRÍTICO GRAVE (relato Falcao — "aceita uma entrega, quando
+      // vai adicionar outra mostra 0 disponíveis, só aparece se deslogar e
+      // logar de novo"): achado real — stopPolling() é chamado ANTES de
+      // toda transação de aceite (linha ~2007, de propósito, evita corrida
+      // de aceite duplo), mas só era retomado no caminho de ERRO (catch);
+      // no caminho de SUCESSO, a busca ficava morta pra sempre. Pro avulso
+      // isso não importa (só pode ter 1 entrega mesmo), mas pra frota —
+      // que pode aceitar quantas quiser — isso travava a busca depois da
+      // 1ª entrega aceita. O botão "+ Buscar mais" não resolvia sozinho:
+      // initGPS() só recria o listener numa TRANSIÇÃO de GPS (de "não
+      // travado" pra "travado"), e o GPS já estava travado desde antes,
+      // então nunca disparava de novo. Só um logout/login (boot do zero)
+      // recriava o listener por acidente. Corrigido: retoma a busca aqui
+      // também, depois de qualquer aceite de frota bem-sucedido.
+      if(_online) startPolling();
     } else {
       _activeDelivery=null;
       await loadActiveDelivery(deliveryIdAceito);
@@ -2741,6 +2775,92 @@ document.addEventListener("DOMContentLoaded", function(){
     el.addEventListener("click",e=>{if(e.target===el)closeModal(el.id);})
   );
 });
+
+/* ============================================================
+   BANNER DE INSTALAÇÃO PWA (v2.2.6) — decisão Falcao: mesmo padrão
+   usado no Burger/Pizza/Petshop. O manifest.json aqui é um arquivo
+   real, deployado junto (não gerado via JS) — este código NUNCA
+   reescreve o link do manifest, só escuta o evento nativo do navegador
+   e abre o prompt de instalação quando o botão é tocado.
+   ============================================================ */
+let _deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  _deferredInstallPrompt = e;
+  if(sessionStorage.getItem('_installBannerDismissed')) return;
+  const banner = document.getElementById('install-banner');
+  if(banner) banner.style.display = 'flex';
+});
+window.addEventListener('appinstalled', () => {
+  const banner = document.getElementById('install-banner');
+  if(banner) banner.style.display = 'none';
+  _deferredInstallPrompt = null;
+});
+
+async function _installApp(){
+  if(!_deferredInstallPrompt){
+    toast('⚠ Prompt de instalação expirou — feche e reabra o app, ou instale pelo menu ⋮ do navegador');
+    const banner = document.getElementById('install-banner');
+    if(banner) banner.style.display = 'none';
+    return;
+  }
+  try{
+    _deferredInstallPrompt.prompt();
+    const choice = await _deferredInstallPrompt.userChoice;
+    toast(choice && choice.outcome==='accepted' ? '✅ Instalando...' : 'Instalação cancelada');
+  }catch(e){
+    toast('⚠ Erro ao abrir instalação: '+(e.message||'desconhecido'));
+  }
+  _deferredInstallPrompt = null;
+  const banner = document.getElementById('install-banner');
+  if(banner) banner.style.display = 'none';
+}
+
+let _installAppRunning = false;
+(function _wireInstallBannerButtons(){
+  const btnInstall=document.getElementById('ib-install-btn');
+  const btnClose=document.getElementById('ib-close-btn');
+  const onInstall=(ev)=>{
+    ev.preventDefault();
+    if(_installAppRunning) return;
+    _installAppRunning = true;
+    _installApp().finally(()=>{ _installAppRunning = false; });
+  };
+  if(btnInstall){
+    btnInstall.addEventListener('click', onInstall);
+    btnInstall.addEventListener('touchend', onInstall);
+  }
+  if(btnClose){
+    const onClose=(ev)=>{
+      ev.preventDefault();
+      const banner=document.getElementById('install-banner');
+      if(banner) banner.style.display='none';
+      try{ sessionStorage.setItem('_installBannerDismissed','1'); }catch(e){}
+    };
+    btnClose.addEventListener('click', onClose);
+    btnClose.addEventListener('touchend', onClose);
+  }
+})();
+
+/* v2.2.6 FEAT: registro do Service Worker — sem isso, o Chrome não
+   considera o app instalável de jeito nenhum, mesmo com manifest certo.
+   IMPORTANTE: precisa existir um arquivo sw.js na mesma pasta deployada
+   do Pedix Go — se não existir ainda, o registro falha silenciosamente
+   (.catch) e o app continua funcionando normal, só sem poder instalar. */
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>{
+    navigator.serviceWorker.register('./sw.js').then(reg=>{
+      reg.update().catch(()=>{});
+    }).catch(e=>{ console.warn('[Pedix Go] Service Worker não registrado:', e.message); });
+  });
+  let _swReloading=false;
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{
+    if(_swReloading) return;
+    _swReloading=true;
+    window.location.reload();
+  });
+}
+
 </script>
 
 <!-- PWA — Service Worker desativado temporariamente para debug -->
