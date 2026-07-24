@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+<!-- Revision: 2026-07-23 v2.2.7 - FIX GRAVÍSSIMO (relato Falcao — "depois que ele aceita o pedido o número do pedido se perde, mesmo com uma entrega ativada"): achado real — o dado orderId sempre esteve certinho no delivery (confirmado do lado dos apps de loja, e a tela de entrega ÚNICA já mostra #orderId desde sempre), mas a tela de MÚLTIPLAS entregas (frota, "Minhas Entregas") nunca mostrava, só "Parada N" + endereço. Não era a informação que sumia, era a tela que nunca exibiu. Adicionado #orderId no card de cada parada, mesmo padrão já usado na tela de entrega única. -->
 <!-- Revision: 2026-07-21 v2.2.6 - FEAT (decisão Falcao — mesmo banner de instalação padronizado do Burger/Pizza/Petshop): adicionado banner "Instalar o Pedix Go" na tela principal (mesma posição — encaixado no topo do conteúdo, não fixo), listener beforeinstallprompt, e registro de Service Worker (que não existia aqui — sem SW registrado, o Chrome não considera o app instalável de jeito nenhum, mesmo com manifest certo). O manifest.json já é um arquivo real deployado (igual padrão do Gestor) — este código NUNCA reescreve esse link via JS, lição aprendida do bug do Petshop. IMPORTANTE: o registro do SW depende de existir um arquivo sw.js deployado na mesma pasta — se não existir ainda, falha silenciosamente e o app continua funcionando normal, só sem poder instalar.
 <!-- Revision: 2026-07-21 v2.2.5 - FIX CRÍTICO GRAVE (relato Falcao — "aceita uma entrega, quando vai adicionar outra mostra 0 disponíveis, só aparece se deslogar e logar de novo"): stopPolling() é chamado ANTES de toda transação de aceite (de propósito, evita corrida de aceite duplo), mas só era retomado no caminho de ERRO (catch) — no caminho de SUCESSO, a busca de pedidos ficava morta pra sempre. Pro avulso isso não importa (só pode ter 1 entrega mesmo), mas pra frota — que pode aceitar quantas quiser — isso travava a busca depois da 1ª entrega aceita. O botão "+ Buscar mais" não resolvia sozinho: initGPS() só recria o listener numa TRANSIÇÃO de GPS (de "não travado" pra "travado"), e o GPS já estava travado desde antes, então nunca disparava de novo. Só um logout/login (boot do zero) recriava o listener por acidente. Corrigido: retoma a busca também depois de qualquer aceite de frota bem-sucedido.
 <!-- Revision: 2026-07-20 v2.2.4 - AUDITORIA FINAL (2 correções): (1) ORTOGRAFIA — 3 mensagens visíveis ao entregador sem acento corrigidas ("loja não encontrada", "Pedido não encontrado", "Vá até a loja"). (2) UI — nome da loja no card de entrega agora trunca com "..." em vez de estourar o layout quando muito longo (white-space:nowrap + text-overflow:ellipsis em .del-card-store); endereços da rota continuam quebrando linha normalmente, de propósito — o entregador precisa ler o endereço completo.
@@ -587,7 +588,7 @@ input,select{font-family:var(--font-body);outline:none}
   <div class="auth-box">
     <div class="auth-logo">Pedix<span>Go</span></div>
     <div class="auth-tagline">App de entregas para motoboys parceiros</div>
-    <div style="font-size:11px;color:#aaa;text-align:center;margin-top:4px;font-weight:600;letter-spacing:.5px">v2.2.6</div>
+    <div style="font-size:11px;color:#aaa;text-align:center;margin-top:4px;font-weight:600;letter-spacing:.5px">v2.2.7</div>
 
     <div class="auth-tabs">
       <button class="auth-tab active" onclick="switchTab('login')">Entrar</button>
@@ -2601,6 +2602,14 @@ function _renderMultiDeliveryList(){
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px">
         <div style="flex:1">
           <div style="font-size:11px;color:var(--muted);font-weight:800;text-transform:uppercase">Parada ${i+1}</div>
+          <!-- v2.2.7 FIX GRAVÍSSIMO (relato Falcao — "depois que ele aceita o
+          pedido o número do pedido se perde, mesmo com uma entrega ativada"):
+          achado real — o dado orderId sempre esteve certinho no delivery
+          (confirmado do lado dos apps de loja, e a tela de entrega ÚNICA já
+          mostra #${'{'}d.orderId{'}'} desde sempre), mas a tela de MÚLTIPLAS
+          entregas (frota) nunca mostrava, só "Parada N" + endereço. Não era
+          a informação que sumia, era a tela que nunca exibiu. -->
+          <div style="font-size:11px;color:var(--muted2);font-weight:800;margin-top:1px">#${escHtml(d.orderId||d.id.slice(0,8).toUpperCase())}</div>
           <div style="font-size:14px;font-weight:800;margin-top:2px">${escHtml(d.destAddr||'Endereço não informado')}</div>
         </div>
         <div style="font-size:15px;font-weight:900;color:var(--green);white-space:nowrap">${(_mbData&&_mbData.esconderValor)?'🔒 Diária':'R$ '+(parseFloat(d.deliveryFee||0)).toFixed(2).replace('.',',')}</div>
